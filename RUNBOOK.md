@@ -38,19 +38,27 @@ The train: `chock`, `chock-catalog`, `chock-{claude,cursor,codex,copilot,devin}-
 8. and 9. A `vX.Y.Z` tag already exists at a different commit. A tag at the manifest
    commit passes, so a re-run after a partial release continues where it stopped.
 
-A train repo that is private reads as "repository not found" with the dry run's token,
-so the check refuses until `chock-site` is public (owner setup checklist item 2).
+A train repo that is private reads as "repository not found", so the check refuses
+until `chock-site` is public (see Prerequisites).
 
-## One-time owner setup (plan/release-1.md, "Owner setup checklist")
+## Prerequisites (owner, once; plan/release-1.md "Owner setup checklist")
 
-- In chock-release, create the environment `release`: required reviewer the owner,
-  deployment branches `main` only. Add its secrets `RELEASE_APP_CLIENT_ID` (the
-  chock-release-bot app's client ID) and `RELEASE_APP_PRIVATE_KEY`. Optionally set the
-  variable `RELEASE_SITE_URL` (default `https://chock-site.pages.dev`; set it to
-  `https://chock.sh` after launch).
-- The app, chock-release-bot, has Contents read/write and is installed only on the
-  train repos. The check reads CI state through the public API, so every train repo
-  must be public.
+- **The `release` environment** in chock-release, with:
+  - **deployment branches limited to `main`**;
+  - **a required reviewer (the owner)**;
+  - its secrets: `RELEASE_APP_CLIENT_ID` (the chock-release-bot app's client ID) and
+    `RELEASE_APP_PRIVATE_KEY`;
+  - optionally the variable `RELEASE_SITE_URL` (default `https://chock-site.pages.dev`;
+    set it to `https://chock.sh` after launch).
+
+  The workflow's own `github.ref == 'refs/heads/main'` condition is not enough on its
+  own: a dispatch from another branch runs that branch's copy of the workflow file,
+  which can drop the condition. Only the environment's branch rule and reviewer keep
+  the credentials away from a non-main branch.
+- **chock-release-bot**, with Contents read/write, installed only on the train repos.
+- **Every train repo public, `chock-site` included.** The check reads CI state and
+  files through the public API, so a private repo reads as "repository not found" and
+  the check refuses. Making `chock-site` public is setup checklist item 2.
 - After this repo's bootstrap PR merges, remove chock-release from the Claude app's
   repository access.
 
@@ -96,7 +104,8 @@ in the environment only if the API rate limit bites; the check never prints it.
    - `release.py pypi`: the chock tag starts chock's own `release.yml` (guard, then the
      `pypi` job in chock's `pypi` environment, which you approve there too). This step
      waits up to an hour for PyPI to serve `chock==X.Y.Z` as one sdist and one wheel,
-     and prints their sha256.
+     and prints their sha256. It does not yet compare them against chock's build
+     provenance attestation (a 1.1 follow-up); check them by hand if in doubt.
    - `release.py site`: moves `chock-site`'s `release` branch to the manifest commit,
      fast-forward only. Cloudflare Pages builds production from it.
    - `release.py verify`: waits up to 30 minutes for `<site>/version.json` to report
