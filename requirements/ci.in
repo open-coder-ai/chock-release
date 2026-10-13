@@ -1,0 +1,4 @@
+-r release.in
+pytest
+ruff
+zizmor

@@ -1,0 +1,17 @@
+# Example only: the shape of a release manifest, with placeholder commits.
+# check.py refuses this file (placeholder commits, and the .example.yaml name).
+# The real manifest is releases/<version>.yaml, written in release week (REL-5).
+version: 1.0.0
+repos:
+  chock:                 {commit: "0000000000000000000000000000000000000000"}
+  chock-catalog:         {commit: "0000000000000000000000000000000000000000"}
+  chock-claude-plugins:  {commit: "0000000000000000000000000000000000000000"}
+  chock-cursor-plugins:  {commit: "0000000000000000000000000000000000000000"}
+  chock-codex-plugins:   {commit: "0000000000000000000000000000000000000000"}
+  chock-copilot-plugins: {commit: "0000000000000000000000000000000000000000"}
+  chock-devin-plugins:   {commit: "0000000000000000000000000000000000000000"}
+  chock-site:            {commit: "0000000000000000000000000000000000000000"}
+  chock-quickstart:      {commit: "0000000000000000000000000000000000000000"}
+  chock-example:         {commit: "0000000000000000000000000000000000000000"}
+inputs:
+  agentseam:             {commit: "0000000000000000000000000000000000000000"}   # recorded, not tagged

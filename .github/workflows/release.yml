@@ -1,0 +1,131 @@
+name: Release
+
+# Owner-triggered only. A dry run (the default) runs check.py and prints the plan;
+# it needs no credentials and changes nothing. A real run needs the `release`
+# environment (owner approval, main only), which holds the chock-release-bot app key.
+# See RUNBOOK.md.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version, MAJOR.MINOR.PATCH (reads releases/<version>.yaml)"
+        required: true
+        type: string
+      dry_run:
+        description: "Dry run: check and print the plan only"
+        required: true
+        type: boolean
+        default: true
+
+permissions: {}
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  VERSION: ${{ inputs.version }}
+
+jobs:
+  check:
+    name: Check and plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7
+        with:
+          python-version: "3.12"
+      - name: Install pinned dependencies
+        run: pip install --require-hashes -r requirements/release.txt
+      - name: Run check.py and print the plan
+        # The train repos are public; this job's token only raises the API rate limit.
+        # A private train repo (chock-site until it is made public) reads as not found,
+        # so the check refuses: it fails closed.
+        # check.py validates VERSION before using it in a path.
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python check.py "releases/${VERSION}.yaml" --version "$VERSION" --plan
+
+  release:
+    name: Release (tags, PyPI, site)
+    needs: check
+    if: ${{ !inputs.dry_run && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    environment: release
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7
+        with:
+          python-version: "3.12"
+      - name: Install pinned dependencies
+        run: pip install --require-hashes -r requirements/release.txt
+      - name: Mint a chock-release-bot token for the train repos
+        id: app
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
+        with:
+          client-id: ${{ secrets.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          owner: open-coder-ai
+          repositories: >-
+            chock,chock-catalog,chock-claude-plugins,chock-cursor-plugins,chock-codex-plugins,
+            chock-copilot-plugins,chock-devin-plugins,chock-site,chock-quickstart,chock-example
+          permission-contents: write
+      - name: "Step 1-2: check again, then tag every train repo"
+        env:
+          GITHUB_TOKEN: ${{ steps.app.outputs.token }}
+        run: python release.py tag "releases/${VERSION}.yaml" --version "$VERSION"
+      - name: "Step 3: wait for PyPI to serve chock==VERSION"
+        env:
+          GITHUB_TOKEN: ${{ steps.app.outputs.token }}
+        run: python release.py pypi "releases/${VERSION}.yaml" --version "$VERSION" --timeout 3600
+      - name: "Step 4: move chock-site release to the manifest commit"
+        env:
+          GITHUB_TOKEN: ${{ steps.app.outputs.token }}
+        run: python release.py site "releases/${VERSION}.yaml" --version "$VERSION"
+      - name: "Step 5: verify the site's version marker"
+        env:
+          GITHUB_TOKEN: ${{ steps.app.outputs.token }}
+          SITE_URL: ${{ vars.RELEASE_SITE_URL || 'https://chock-site.pages.dev' }}
+        run: python release.py verify "releases/${VERSION}.yaml" --version "$VERSION" --site "$SITE_URL" --timeout 1800
+      - name: Write the release summary
+        env:
+          GITHUB_TOKEN: ${{ steps.app.outputs.token }}
+          SITE_URL: ${{ vars.RELEASE_SITE_URL || 'https://chock-site.pages.dev' }}
+        run: |
+          python release.py summary "releases/${VERSION}.yaml" --version "$VERSION" --site "$SITE_URL" > summary.md
+          cat summary.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: release-summary
+          path: summary.md
+          retention-days: 90
+
+  publish-summary:
+    name: "Step 6: GitHub release in chock-release"
+    needs: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: release
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7.0.0
+        with:
+          name: release-summary
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TARGET: ${{ github.sha }}
+        run: gh release create "v${VERSION}" --target "$TARGET" --title "chock v${VERSION}" --notes-file summary.md
