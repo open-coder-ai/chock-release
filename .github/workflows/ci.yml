@@ -1,0 +1,54 @@
+name: CI
+
+# ruff, pytest, actionlint and zizmor on every PR and on main. No secrets, read-only.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7
+        with:
+          python-version: "3.12"
+      - name: Install pinned tools
+        run: pip install --require-hashes -r requirements/ci.txt
+      - name: ruff
+        run: |
+          ruff check .
+          ruff format --check .
+      - name: pytest
+        run: python -m pytest -q
+      - name: zizmor
+        # --offline: audit the workflow files only, with no token and no network.
+        run: zizmor --offline --min-severity low .github/workflows
+
+  actionlint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          persist-credentials: false
+      - name: actionlint
+        # Version-pinned through the Go module checksum database.
+        run: |
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+          "$(go env GOPATH)/bin/actionlint" -color
