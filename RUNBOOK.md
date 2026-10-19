@@ -14,7 +14,7 @@ create the environment, the app or its secrets.
 | `releases/X.Y.Z.yaml` | The manifest: `version`, one 40-hex `commit` per train repo, and recorded `inputs` (agentseam). |
 | `releases/*.example.yaml` | The manifest shape with placeholder commits. `check.py` refuses it. |
 | `check.py` | The consistency check (checks 1–9 below). Lists every mismatch, then exits 1. |
-| `release.py` | Release steps 2–6. Each step re-runs the check before it writes anything. |
+| `release.py` | The dry-run build (step 1) and release steps 2–6. Each step re-runs the check before it does anything. |
 | `.github/workflows/release.yml` | `workflow_dispatch` with `version` and `dry_run` (default true). |
 
 The train: `chock`, `chock-catalog`, `chock-{claude,cursor,codex,copilot,devin}-plugins`,
@@ -22,24 +22,58 @@ The train: `chock`, `chock-catalog`, `chock-{claude,cursor,codex,copilot,devin}-
 
 ## What the check refuses
 
-1. A train repo missing, an extra repo, a commit that is not 40 lowercase hex, the
-   all-zero placeholder, or a commit that is not on the repo's default branch.
-2. CI not green on a named commit: any check run not completed, any conclusion other
-   than success, neutral or skipped, a failing commit status, or no CI at all.
-3. `chock`'s `pyproject.toml` `[project].version` (that is `chock.__version__`) is not `X.Y.Z`.
+1. A train repo missing, an extra repo, an unknown key in an entry, a duplicate key
+   anywhere in the manifest, a commit that is not 40 lowercase hex, the all-zero
+   placeholder, or a commit that is not on the repo's default branch.
+2. CI not green on a named commit, `inputs.agentseam` included. The check reads one
+   workflow per repo (the table below), on the default branch at that commit: the newest
+   run must have completed with success, and every required job in it must have
+   completed with success. A required job the run skipped is not green. A failing
+   combined commit status also refuses. Other check runs on the commit (the catalog's
+   nightly sweep and drift, a tag-triggered release run, code scanning) are not read.
+3. `chock`'s `pyproject.toml` `[project].version` (that is `chock.__version__`) is not
+   `X.Y.Z`; any dependency, extras included, is a direct reference (`name @ url`), which
+   PyPI rejects; agentseam is not pinned `agentseam==<version>`; or that version is not
+   what agentseam's `pyproject.toml` reports at `inputs.agentseam`.
 4. `chock-catalog`'s `.framework-ref` is not the engine commit, or its `VERSION` is not `X.Y.Z`.
 5. A plugin repo's `generated_from.yaml` (`generated_from: {catalog, engine}`) does not
    name the manifest's catalog and engine commits.
-6. `chock-site`'s `.framework-ref` or `.catalog-ref` differs from the manifest, or its
-   `data/version.json` `version` is not `X.Y.Z`.
-7. `chock-quickstart` or `chock-example` has no chock pin in `README.md`,
-   `requirements.txt` or `pyproject.toml`, or any pin there is neither the engine commit
-   nor `chock==X.Y.Z`.
+6. `chock-site`'s `.framework-ref` or `.catalog-ref` differs from the manifest, its
+   `data/version.json` `version` is not `X.Y.Z`, or its `data/agentseam-source/source.json`
+   `agentseam_ref` is not `inputs.agentseam`.
+7. `chock-quickstart` or `chock-example` has no chock pin in `README.md`, `docs/README.md`,
+   `requirements.txt` or `pyproject.toml`; a pin there is neither the engine commit nor
+   `chock==X.Y.Z` (an archive of a branch or tag counts as a wrong commit); a chock
+   requirement uses a range operator; or a `pip install chock` line names no version.
 8. and 9. A `vX.Y.Z` tag already exists at a different commit. A tag at the manifest
    commit passes, so a re-run after a partial release continues where it stopped.
 
+The required workflow and jobs per repo (`check.REQUIRED_WORKFLOWS`; a matrix job matches
+its name prefix):
+
+| Repo | Workflow | Required jobs |
+|---|---|---|
+| chock | `ci.yml` | `validate`, `acceptance (tier 1)` |
+| chock-catalog | `ci.yml` | `policies` |
+| chock-*-plugins | `generated-only.yml` | `verify` |
+| chock-site | `ci.yml` | `lint`, `unit`, `e2e` |
+| chock-quickstart, chock-example | `ci.yml` | `check` |
+| agentseam (input) | `ci.yml` | `lint`, `test` |
+
+Two consequences:
+
+- **Plugin repos.** `publish.yml` pushes with the built-in token, which starts no workflow
+  run, so the published commit has no CI until you dispatch `generated-only.yml` on
+  `main` in each plugin repo. Do that after every publish, before the dry run.
+- **quickstart and example.** They have no workflow until REL-1c adds `ci.yml` with a
+  `check` job. Until then the check refuses them, which is the intended answer for an
+  untested commit.
+
 A train repo that is private reads as "repository not found", so the check refuses
 until `chock-site` is public (see Prerequisites).
+
+A GitHub API failure (anything but 404) is reported once, as the API error, and the
+check refuses; it never turns into a false "not found".
 
 ## Prerequisites (owner, once; plan/release-1.md "Owner setup checklist")
 
@@ -69,10 +103,15 @@ chock depends on agentseam. PyPI rejects a direct-reference dependency
 
 1. Release agentseam first, with a version that carries main's adapters, and confirm
    PyPI serves it.
-2. In chock, replace the direct-reference pin with that released version in
-   `pyproject.toml` and every requirements file (a normal owner-merged PR).
+2. In chock, replace the direct-reference pin with `agentseam==<that version>` in
+   `pyproject.toml` and every requirements file (a normal owner-merged PR). Check 3
+   refuses a manifest whose chock still carries the direct reference, and the dry-run
+   build refuses the built wheel for the same reason, so a forgotten swap stops before
+   any tag.
 3. Only then build the chock release candidate. Record the agentseam commit of that
-   release under `inputs.agentseam` in the manifest.
+   release under `inputs.agentseam` in the manifest: check 3 compares its
+   `pyproject.toml` version with chock's pin, and check 6 compares it with the site's
+   `data/agentseam-source/source.json`.
 
 Then the prepare phase (plan/release-1.md): version files and pins in every train repo,
 each through a normal PR, then the manifest PR adding `releases/X.Y.Z.yaml` here.
@@ -81,22 +120,31 @@ each through a normal PR, then the manifest PR adding `releases/X.Y.Z.yaml` here
 
 1. Actions → Release → Run workflow, on `main`. Enter `version: X.Y.Z`, leave
    `dry_run` ticked.
-2. The `Check and plan` job runs `check.py releases/X.Y.Z.yaml --version X.Y.Z --plan`.
-   It needs no approval and no credentials beyond the job's read-only token.
+2. The `Check, build and plan` job runs `check.py releases/X.Y.Z.yaml --version X.Y.Z --plan`,
+   then `release.py build`, which clones chock at its manifest commit, builds its sdist
+   and wheel, and refuses what PyPI would refuse (a version other than `X.Y.Z`, a
+   direct-reference `Requires-Dist`, anything but one sdist and one wheel). Nothing is
+   uploaded. The job needs no approval and no credentials beyond its read-only token,
+   which the build's subprocesses never see.
 3. On a mismatch it prints `REFUSED: N mismatch(es)` and every one of them. Fix each in
    its repo, update the manifest by PR, and dry-run again.
-4. On success it prints `OK` and the plan: each tag it would create, the PyPI wait,
-   the `release` branch move, the site check and the GitHub release. Nothing changes.
+4. On success it prints `OK`, the built files with their sha256, and the plan: the
+   build, each tag it would create, the PyPI wait, the `release` branch move, the site
+   check and the GitHub release. Nothing changes.
 
-Locally, the same check: `pip install --require-hashes -r requirements/release.txt`,
-then `python check.py releases/X.Y.Z.yaml --version X.Y.Z --plan`. Set `GITHUB_TOKEN`
-in the environment only if the API rate limit bites; the check never prints it.
+Locally, the same two commands: `pip install --require-hashes -r requirements/release.txt`,
+then `python check.py releases/X.Y.Z.yaml --version X.Y.Z --plan` and
+`python release.py build releases/X.Y.Z.yaml --version X.Y.Z`. Set `GITHUB_TOKEN` in
+the environment first (for example `GITHUB_TOKEN=$(gh auth token)`): one run makes more
+requests than GitHub's unauthenticated limit of 60 per hour allows, so an unauthenticated
+run fails with `HTTP 403`. The check never prints the token. The build needs `git` and
+network access to PyPI for chock's build backend.
 
 ## Real run
 
 1. Run the workflow on `main` with `version: X.Y.Z` and `dry_run` unticked.
-2. `Check and plan` runs again. Then the `release` job waits for your approval of the
-   `release` environment.
+2. `Check, build and plan` runs again, the dry-run build included: it is the build before
+   tagging. Then the `release` job waits for your approval of the `release` environment.
 3. After approval it mints a short-lived chock-release-bot token and runs, stopping at
    the first failure:
    - `release.py tag`: re-runs the full check, then tags every train repo `vX.Y.Z`
@@ -104,25 +152,32 @@ in the environment only if the API rate limit bites; the check never prints it.
    - `release.py pypi`: the chock tag starts chock's own `release.yml` (guard, then the
      `pypi` job in chock's `pypi` environment, which you approve there too). This step
      waits up to an hour for PyPI to serve `chock==X.Y.Z` as one sdist and one wheel,
-     and prints their sha256. It does not yet compare them against chock's build
-     provenance attestation (a 1.1 follow-up); check them by hand if in doubt.
+     each with a sha256, neither yanked, and prints the sha256 values. While PyPI shows
+     only one of the two files the upload is still in progress and the step keeps
+     polling; any other file set on the version (a third file, an unknown type, a
+     yanked file) refuses at once. It does not yet compare the hashes against chock's
+     build provenance attestation (a 1.1 follow-up); check them by hand if in doubt.
    - `release.py site`: moves `chock-site`'s `release` branch to the manifest commit,
      fast-forward only. Cloudflare Pages builds production from it.
    - `release.py verify`: waits up to 30 minutes for `<site>/version.json` to report
      the manifest's version, engine and catalog.
    - `release.py summary`: writes the summary (tags, inputs, PyPI URL, site URL, the
      manifest) to the job summary.
-4. `publish-summary` (approve `release` again) creates the GitHub release `vX.Y.Z` in
-   chock-release with that summary.
+4. `publish-summary` creates the GitHub release `vX.Y.Z` in chock-release with that
+   summary. It runs only after the approved `release` job and uses only this
+   repository's own token, so it asks for no second approval. If the release already
+   exists it is left as it is; if a `vX.Y.Z` tag exists here at another commit the job
+   refuses rather than move it.
 
-Steps after `tag` re-run the check without check 2, because the new tags start check
-runs of their own on the same commits.
+Every step re-runs the full check, check 2 included: the tag-triggered runs that
+`vX.Y.Z` starts on the same commits carry the tag as their branch and are not read.
 
 ### Re-running after a partial failure
 
 Re-run the whole workflow with the same version. Tags already at the manifest commits
-pass checks 8 and 9 and are skipped. If a tag-triggered run left a failed check on a
-named commit, check 2 refuses: find out why before going further, and if anything was
+pass checks 8 and 9 and are skipped, and a release summary that already exists is left
+alone. If the required workflow on a named commit has a newer failed run on the default
+branch, check 2 refuses: find out why before going further, and if anything was
 published, go to Rollback.
 
 ## Rollback
@@ -144,4 +199,6 @@ published, go to Rollback.
 
 Every change to this repo is an owner-merged PR. CI runs ruff, pytest, actionlint and
 zizmor. Workflow actions stay pinned by full commit SHA, with `permissions: {}` at the
-top and the minimum granted per job.
+top and the minimum granted per job. The requirements files are compiled with
+`uv pip compile --universal --python-version 3.12 --generate-hashes`, so the hash-pinned
+install works on Linux, macOS and Windows alike.
