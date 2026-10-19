@@ -1,9 +1,9 @@
 name: Release
 
-# Owner-triggered only. A dry run (the default) runs check.py and prints the plan;
-# it needs no credentials and changes nothing. A real run needs the `release`
-# environment (owner approval, main only), which holds the chock-release-bot app key.
-# See RUNBOOK.md.
+# Owner-triggered only. A dry run (the default) runs check.py, builds chock at its
+# manifest commit without uploading anything, and prints the plan; it needs no
+# credentials and changes nothing. A real run needs the `release` environment (owner
+# approval, main only), which holds the chock-release-bot app key. See RUNBOOK.md.
 
 on:
   workflow_dispatch:
@@ -13,7 +13,7 @@ on:
         required: true
         type: string
       dry_run:
-        description: "Dry run: check and print the plan only"
+        description: "Dry run: check, build and print the plan only"
         required: true
         type: boolean
         default: true
@@ -29,9 +29,9 @@ env:
 
 jobs:
   check:
-    name: Check and plan
+    name: Check, build and plan
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     permissions:
       contents: read
     steps:
@@ -51,6 +51,14 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: python check.py "releases/${VERSION}.yaml" --version "$VERSION" --plan
+      - name: "Step 1: dry-run build of chock at its manifest commit"
+        # Clones chock at the manifest commit and builds its sdist and wheel, then refuses
+        # what PyPI would refuse (a direct-reference dependency, a version mismatch).
+        # Nothing is uploaded. The build's subprocesses get no credential-looking
+        # variable, so chock's build backend never sees this job's token.
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python release.py build "releases/${VERSION}.yaml" --version "$VERSION"
 
   release:
     name: Release (tags, PyPI, site)
@@ -81,7 +89,7 @@ jobs:
             chock,chock-catalog,chock-claude-plugins,chock-cursor-plugins,chock-codex-plugins,
             chock-copilot-plugins,chock-devin-plugins,chock-site,chock-quickstart,chock-example
           permission-contents: write
-      - name: "Step 1-2: check again, then tag every train repo"
+      - name: "Step 2: check again, then tag every train repo"
         env:
           GITHUB_TOKEN: ${{ steps.app.outputs.token }}
         run: python release.py tag "releases/${VERSION}.yaml" --version "$VERSION"
@@ -113,19 +121,36 @@ jobs:
 
   publish-summary:
     name: "Step 6: GitHub release in chock-release"
+    # Runs only after the approved `release` job; it reads no environment secret, only
+    # this repository's own token, so it needs no second approval of its own.
     needs: release
+    if: ${{ !inputs.dry_run && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    environment: release
     permissions:
       contents: write
     steps:
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7.0.0
         with:
           name: release-summary
-      - name: Create the GitHub release
+      - name: Create the GitHub release, once
+        # Idempotent: a re-run after a partial failure finds the release and leaves it.
+        # A v<version> tag that already exists here at another commit is refused, never
+        # moved; the summary of a re-run then belongs in the release's notes by hand.
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           TARGET: ${{ github.sha }}
-        run: gh release create "v${VERSION}" --target "$TARGET" --title "chock v${VERSION}" --notes-file summary.md
+        run: |
+          tag="v${VERSION}"
+          if gh release view "$tag" --json tagName > existing-release.json 2>&1; then
+            echo "release $tag already exists in $GH_REPO, left as is"
+            exit 0
+          fi
+          if existing="$(gh api "repos/${GH_REPO}/git/ref/tags/${tag}" --jq .object.sha 2>&1)"; then
+            if [ "$existing" != "$TARGET" ]; then
+              echo "tag $tag already exists in $GH_REPO at $existing, this run is $TARGET: refusing" >&2
+              exit 1
+            fi
+          fi
+          gh release create "$tag" --target "$TARGET" --title "chock $tag" --notes-file summary.md
