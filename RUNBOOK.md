@@ -14,7 +14,7 @@ create the environment, the app or its secrets.
 | `releases/X.Y.Z.yaml` | The manifest: `version`, one 40-hex `commit` per train repo, and recorded `inputs` (agentseam). |
 | `releases/*.example.yaml` | The manifest shape with placeholder commits. `check.py` refuses it. |
 | `check.py` | The consistency check (checks 1–9 below). Lists every mismatch, then exits 1. `--candidate <file>` runs it against the `rc` heads. |
-| `rc.py` | Assembles, pins and reports the `rc` branches of a candidate (see "Candidate"). |
+| `rc.py` | Assembles, pins, opens the rc draft PRs of, and reports on the `rc` branches of a candidate (see "Candidate"). |
 | `candidates/<version>-rc.<n>.yaml` | A candidate: the PR numbers to merge into each repo's `rc`. Not a manifest; `release.py` refuses it. |
 | `release.py` | The dry-run build (step 1) and release steps 2–6. Each step re-runs the check before it does anything. |
 | `.github/workflows/release.yml` | `workflow_dispatch` with `version` and `dry_run` (default true). |
@@ -142,22 +142,34 @@ A round:
 3. `python rc.py pins candidates/X.Y.Z-rc.N.yaml` adds one commit on chock-site's `rc`
    setting `.catalog-ref` and `.framework-ref` to the catalog's and the engine's `rc`
    heads, so the site build of `rc` is the candidate.
-4. `python rc.py status candidates/X.Y.Z-rc.N.yaml` (also `assemble`) takes `--only <repo>`,
+4. `python rc.py prs candidates/X.Y.Z-rc.N.yaml` opens, for each repo whose `rc` exists, a
+   draft pull request from `rc` to `main` titled `Release candidate X.Y.Z-rc.N: do not merge`,
+   so that each repo's CI (which triggers on pull requests and pushes to main, not on a push
+   to `rc`) runs on the `rc` head, which is what check 2 reads. The body says it is the
+   staging candidate, lists the candidate's PRs it carries and, for chock-site, the two pins.
+   When the PR exists, only its body is rewritten (title and draft state stay). A repo with no
+   `rc` is skipped with one line. `--dry-run` reads and prints what it would do. Never merge,
+   mark ready or close an rc PR: promotion merges the listed PRs to `main`, and the owner
+   closes the rc PRs when deleting the `rc` branches. Run `prs` after `pins`, and again
+   after a later round to refresh the bodies.
+5. `python rc.py status candidates/X.Y.Z-rc.N.yaml` (also `assemble`, `prs`) takes `--only <repo>`,
    repeatable, to cover part of the train, for a session whose GitHub scope reaches one
    repo; a repo not in the candidate file is a usage error. `status` prints each repo's `rc` head, which
-   listed PRs it contains, and whether `main` has moved under it.
-5. `python check.py --candidate candidates/X.Y.Z-rc.N.yaml --plan` is the release check
+   listed PRs it contains, the number of its rc PR (or `none`), and whether `main` has moved under it.
+6. `python check.py --candidate candidates/X.Y.Z-rc.N.yaml --plan` is the release check
    against the `rc` heads, by the same code paths. Checks 1 (on `rc`, not the default
-   branch), 2, 6a and 7 refuse. Checks 3, 4b and 6b, the version files, warn until
-   REL-5 lands. Checks 4a and 5 (the catalog's `.framework-ref`, the plugins'
-   `generated_from`) warn too: the owner's adopt-framework run and the plugin
-   regeneration (REL-4) set those pins at release prep, never `rc.py`. Only the site's
+   branch), 2 and 6a refuse. Checks 3, 4b and 6b, the version files, warn until
+   REL-5 lands. Checks 4a, 5 and 7 (the catalog's `.framework-ref`, the plugins'
+   `generated_from`, the quickstart and example engine pins) warn too: the owner's
+   adopt-framework run, the plugin regeneration (REL-4) and REL-5 set those pins at release
+   prep, never `rc.py`; they still refuse in manifest mode. A check 2 "never ran" on `rc` means
+   the rc draft PR is missing: run `rc.py prs`. Only the site's
    pins (6a) are moved by `rc.py pins`, so 6a refuses. Checks 8 and 9 (tags) are skipped. A required job that is red on `rc` and
    also red on the repo's default branch is printed as `known red` and is a warning
    (the plugin repos' `verify`, for example). `main` having moved under `rc` is a
    warning. The plan prints "candidate: nothing is tagged, published or moved".
 
-What agents may do: everything above except `--reset`. An agent assembles, pins, reads
+What agents may do: everything above except `--reset`. An agent assembles, pins, opens the rc draft PRs, reads
 status and runs the candidate check; every push to `rc` is a merge commit or a
 fast-forward. An agent never tags, publishes, moves `release`, or passes `--reset` or
 `--i-am-the-owner`.

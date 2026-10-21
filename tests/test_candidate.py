@@ -107,6 +107,7 @@ def test_check_one_reads_rc_not_the_default_branch(cworld, candidate_file):
     cworld.add_run("chock", "ci.yml", head_branch="main")
     _, result = run_candidate(cworld, candidate_file())
     assert errors(result, "check 2: chock: ci.yml never ran on") and errors(result, "on rc")
+    assert errors(result, "on rc (open the rc draft PR: rc.py prs)")  # the hint, in candidate mode only
 
 
 def test_ci_must_be_green_on_rc(cworld, candidate_file):
@@ -120,16 +121,16 @@ def test_ci_must_be_green_on_rc(cworld, candidate_file):
     "mutate, needle",
     [
         (lambda w: w.put("chock-site", ".catalog-ref", sha("other") + "\n"), "check 6: chock-site: .catalog-ref"),
-        (lambda w: w.put("chock-example", "requirements.txt", "chock==1.2.3\n"), "check 7: chock-example"),
     ],
 )
-def test_checks_6a_7_refuse(cworld, candidate_file, mutate, needle):
+def test_check_6a_refuses(cworld, candidate_file, mutate, needle):
     mutate(cworld)
     _, result = run_candidate(cworld, candidate_file())
     assert errors(result, needle)
 
 
 PIN_BREAKS = [
+    (lambda w: w.put("chock-example", "requirements.txt", "chock==1.2.3\n"), "check 7: chock-example"),
     (lambda w: w.put("chock-catalog", ".framework-ref", sha("other") + "\n"), "check 4: chock-catalog: .framework-ref"),
     (
         lambda w: w.put("chock-codex-plugins", "generated_from.yaml", "generated_from: {catalog: x, engine: y}"),
@@ -139,7 +140,7 @@ PIN_BREAKS = [
 
 
 @pytest.mark.parametrize("mutate, needle", PIN_BREAKS)
-def test_checks_4a_and_5_only_warn_in_candidate_mode(cworld, candidate_file, mutate, needle):
+def test_checks_4a_5_and_7_only_warn_in_candidate_mode(cworld, candidate_file, mutate, needle):
     mutate(cworld)
     _, result = run_candidate(cworld, candidate_file())
     assert result.ok, result.errors
@@ -147,7 +148,7 @@ def test_checks_4a_and_5_only_warn_in_candidate_mode(cworld, candidate_file, mut
 
 
 @pytest.mark.parametrize("mutate, needle", PIN_BREAKS)
-def test_checks_4a_and_5_still_refuse_in_manifest_mode(tmp_path, mutate, needle):
+def test_checks_4a_5_and_7_still_refuse_in_manifest_mode(tmp_path, mutate, needle):
     w = World.consistent()
     mutate(w)
     path = tmp_path / f"{VERSION}.yaml"

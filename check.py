@@ -22,10 +22,11 @@ The numbered checks follow org-plan plan/release-1.md:
 9. An existing v<version> tag at the manifest commit passes; at any other commit, refuses.
 
 Candidate mode (--candidate candidates/<version>-rc.<n>.yaml) runs the same code paths
-against each repo's `rc` head instead of a manifest commit. Checks 1 (on `rc`), 2, 6a and 7
-refuse; 3, 4a, 4b, 5 and 6b warn: the version files until REL-5 lands, and the catalog's and
-the plugins' pins because the owner's adopt-framework run and REL-4's regeneration set them at
-release prep, never rc.py. 8 and 9 are skipped, because nothing is tagged, published or moved.
+against each repo's `rc` head instead of a manifest commit. Checks 1 (on `rc`), 2 and 6a
+refuse; 3, 4a, 4b, 5, 6b and 7 warn: the version files until REL-5 lands, and the catalog's, the
+plugins' and the quickstart and example engine pins because the owner's adopt-framework run,
+REL-4's regeneration and REL-5 set them at release prep, never rc.py.
+8 and 9 are skipped, because nothing is tagged, published or moved.
 A required job that is also red on the repo's default branch is a warning ("known red"), not a refusal.
 
 Credentials come only from the environment (GITHUB_TOKEN). They are never printed.
@@ -152,7 +153,7 @@ NETWORK_ERRORS = (OSError, http.client.HTTPException, json.JSONDecodeError)
 
 
 class GitHub:
-    """Minimal read-only GitHub REST client. get() returns parsed JSON, or None on 404."""
+    """Minimal GitHub REST client. get() returns parsed JSON, or None on 404; send() is for rc.py prs."""
 
     def __init__(self, token: str | None = None, api: str = "https://api.github.com"):
         self._token = token
@@ -177,6 +178,27 @@ class GitHub:
             raise GitHubError(f"GET {path}: HTTP {exc.code}") from None
         except NETWORK_ERRORS as exc:
             raise GitHubError(f"GET {path}: {type(exc).__name__}") from None
+
+    def send(self, method: str, path: str, body: dict) -> object | None:
+        """POST or PATCH <body> as JSON (rc.py prs only): parsed JSON; HTTP errors name path and status."""
+        if method not in ("POST", "PATCH"):
+            raise ValueError("send takes POST or PATCH")
+        req = urllib.request.Request(  # noqa: S310 (https base, set in __init__)
+            self._api + path, data=json.dumps(body).encode(), method=method
+        )
+        req.add_header("Accept", "application/vnd.github+json")
+        req.add_header("Content-Type", "application/json")
+        req.add_header("X-GitHub-Api-Version", "2022-11-28")
+        req.add_header("User-Agent", "chock-release-check")
+        if self._token:
+            req.add_header("Authorization", f"Bearer {self._token}")
+        try:
+            with OPENER.open(req, timeout=30) as resp:  # noqa: S310 (fixed https base)
+                return json.load(resp)
+        except urllib.error.HTTPError as exc:
+            raise GitHubError(f"{method} {path}: HTTP {exc.code}") from None
+        except NETWORK_ERRORS as exc:
+            raise GitHubError(f"{method} {path}: {type(exc).__name__}") from None
 
 
 class StrictLoader(yaml.SafeLoader):
@@ -360,7 +382,7 @@ class Checker:
         self.candidate = candidate
 
     def _refuse(self, msg: str, soft: bool = False) -> None:
-        """Refuse; in candidate mode a soft finding (the version files, until REL-5) is a warning."""
+        """Refuse; in candidate mode a soft finding (the version files and release-prep pins) is a warning."""
         if soft and self.candidate:
             self.r.warn(msg)
         else:
@@ -478,7 +500,8 @@ class Checker:
             r for r in runs if isinstance(r, dict) and r.get("head_sha") == commit and r.get("head_branch") == branch
         ]
         if not runs:
-            return [(f"check 2: {repo}: {workflow} never ran on {commit[:12]} on {branch}", None)]
+            hint = " (open the rc draft PR: rc.py prs)" if self.candidate and branch == CANDIDATE_BRANCH else ""
+            return [(f"check 2: {repo}: {workflow} never ran on {commit[:12]} on {branch}{hint}", None)]
         # The newest run is the one that counts: a re-run after a fix supersedes the failure.
         run = max(runs, key=lambda r: (str(r.get("created_at", "")), int(r.get("run_number") or 0)))
         run_id = run.get("id")
@@ -667,7 +690,7 @@ class Checker:
             try:
                 text = base64.b64decode(data.get("content", "")).decode("utf-8")
             except (ValueError, UnicodeDecodeError):
-                self.r.refuse(f"check 7: {repo}: {path} is not UTF-8 text")
+                self._refuse(f"check 7: {repo}: {path} is not UTF-8 text", soft=True)
                 continue
             for pattern, kind in ((GIT_PIN, "commit"), (ARCHIVE_PIN, "commit"), (PYPI_PIN, "version")):
                 for match in pattern.finditer(text):
@@ -675,15 +698,15 @@ class Checker:
                     got = match.group(1)
                     want = engine if kind == "commit" else self.m.version
                     if got != want:
-                        self.r.refuse(f"check 7: {repo}: {path} pins chock {kind} {got!r}, want {want!r}")
+                        self._refuse(f"check 7: {repo}: {path} pins chock {kind} {got!r}, want {want!r}", soft=True)
             for match in RANGE_PIN.finditer(text):
                 found += 1
-                self.r.refuse(f"check 7: {repo}: {path} has {match.group(0)!r}, want chock=={self.m.version}")
+                self._refuse(f"check 7: {repo}: {path} has {match.group(0)!r}, want chock=={self.m.version}", soft=True)
             for match in BARE_INSTALL.finditer(text):
                 found += 1
-                self.r.refuse(f"check 7: {repo}: {path} has {match.group(0)!r}, which is unpinned")
+                self._refuse(f"check 7: {repo}: {path} has {match.group(0)!r}, which is unpinned", soft=True)
         if found == 0 and unread == 0:
-            self.r.refuse(f"check 7: {repo}: no chock pin found in {', '.join(PIN_FILES)}")
+            self._refuse(f"check 7: {repo}: no chock pin found in {', '.join(PIN_FILES)}", soft=True)
 
     # 8, 9
     def tag(self, repo: str, commit: str) -> None:
