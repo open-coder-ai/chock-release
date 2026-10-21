@@ -28,6 +28,8 @@ plugins' and the quickstart and example engine pins because the owner's adopt-fr
 REL-4's regeneration and REL-5 set them at release prep, never rc.py.
 8 and 9 are skipped, because nothing is tagged, published or moved.
 A required job that is also red on the repo's default branch is a warning ("known red"), not a refusal.
+A GitHub API error reading an input repo (agentseam: recorded, never tagged) is a warning here, a
+refusal in manifest mode, so a session whose scope lacks that repo can still read the candidate's verdict.
 
 Credentials come only from the environment (GITHUB_TOKEN). They are never printed.
 
@@ -258,6 +260,8 @@ class Candidate:
     rc: int
     base: str
     prs: dict[str, list[int]]
+    # repo -> path globs the candidate rewrites on `rc` after assembly (rc.py assemble may take a PR's side there)
+    regenerated: dict[str, list[str]] = field(default_factory=dict)
 
 
 def looks_like_candidate(path: Path) -> bool:
@@ -269,6 +273,24 @@ def looks_like_candidate(path: Path) -> bool:
     except (OSError, UnicodeDecodeError, yaml.YAMLError):
         return False
     return isinstance(data, dict) and "base" in data
+
+
+def load_regenerated(raw: object, result: Result) -> dict[str, list[str]]:
+    """The optional `regenerated:` mapping, repo to path globs; shape errors go to result."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        result.refuse("candidate: 'regenerated' must be a mapping of repo to a list of path globs")
+        return {}
+    globs: dict[str, list[str]] = {}
+    for name, patterns in raw.items():
+        if name not in TRAIN:
+            result.refuse(f"candidate: regenerated.{name} is not in the train")
+        elif not isinstance(patterns, list) or not all(isinstance(g, str) and g.strip() for g in patterns):
+            result.refuse(f"candidate: regenerated.{name} must be a list of non-empty path globs, got {patterns!r}")
+        else:
+            globs[name] = patterns
+    return globs
 
 
 def load_candidate(path: Path, result: Result) -> Candidate | None:
@@ -285,7 +307,7 @@ def load_candidate(path: Path, result: Result) -> Candidate | None:
     if not isinstance(data, dict):
         result.refuse("candidate: top level must be a mapping")
         return None
-    for key in sorted(set(data) - {"version", "base", "repos"}, key=str):
+    for key in sorted(set(data) - {"version", "base", "repos", "regenerated"}, key=str):
         result.refuse(f"candidate: unknown top-level key '{key}'")
     version = data.get("version")
     if not isinstance(version, str) or not SEMVER.fullmatch(version):
@@ -313,9 +335,10 @@ def load_candidate(path: Path, result: Result) -> Candidate | None:
             prs[name] = numbers
     for name in sorted(set(raw) - set(TRAIN), key=str):
         result.refuse(f"candidate: repos.{name} is not in the train")
+    regenerated = load_regenerated(data.get("regenerated"), result)
     if not result.ok or named is None:
         return None
-    return Candidate(version=version, rc=int(named.group(2)), base=CANDIDATE_BASE, prs=prs)
+    return Candidate(version=version, rc=int(named.group(2)), base=CANDIDATE_BASE, prs=prs, regenerated=regenerated)
 
 
 def load_manifest(path: Path, result: Result) -> Manifest | None:
@@ -393,7 +416,10 @@ class Checker:
         try:
             return self.gh.get(f"/repos/{OWNER}/{repo}{path}")
         except GitHubError as exc:
-            self.r.refuse(f"{repo}: GitHub API error: {exc}")
+            if self.candidate and repo in INPUTS:  # recorded, never tagged: a session may lack the scope to read it
+                self.r.warn(f"{repo}: GitHub API error: {exc}")
+            else:
+                self.r.refuse(f"{repo}: GitHub API error: {exc}")
             return API_ERROR
 
     def _pages(self, repo: str, path: str, key: str) -> list[dict] | None:
@@ -673,6 +699,8 @@ class Checker:
             (SITE_VERSION_FILE, "version", self.m.version, "version"),
             (SITE_AGENTSEAM_FILE, "agentseam_ref", self.m.inputs.get(AGENTSEAM), f"manifest {AGENTSEAM}"),
         ):
+            if want is None and key == "agentseam_ref":
+                continue  # no recorded input to compare with: check 1 already reported why
             text = self._file(SITE, path, soft=True)
             if text is None:
                 continue
@@ -784,12 +812,12 @@ class Checker:
             self.tag(repo, commit)
 
 
-def ref_head(gh: GitHub, repo: str, branch: str, result: Result) -> str | None:
-    """The commit a branch points at, or None (recorded)."""
+def ref_head(gh: GitHub, repo: str, branch: str, result: Result, soft: bool = False) -> str | None:
+    """The commit a branch points at, or None (recorded; a warning when soft)."""
     try:
         ref = gh.get(f"/repos/{OWNER}/{repo}/git/ref/heads/{urllib.parse.quote(branch)}")
     except GitHubError as exc:
-        result.refuse(f"{repo}: GitHub API error: {exc}")
+        (result.warn if soft else result.refuse)(f"{repo}: GitHub API error: {exc}")
         return None
     sha = ref.get("object", {}).get("sha") if isinstance(ref, dict) else None
     if not isinstance(sha, str) or not SHA.fullmatch(sha):
@@ -811,9 +839,9 @@ def check_candidate(path: Path, gh: GitHub) -> tuple[Candidate | None, Manifest 
             repos[repo] = head
     inputs: dict[str, str] = {}
     for name in INPUTS:  # not a candidate repo: its default branch head stands in for the recorded commit
-        scratch = Checker(gh, Manifest(candidate.version, {}, {}), result)
+        scratch = Checker(gh, Manifest(candidate.version, {}, {}), result, candidate=True)
         branch = scratch.default_branch(name)
-        head = ref_head(gh, name, branch, result) if branch else None
+        head = ref_head(gh, name, branch, result, soft=True) if branch else None
         if head is not None:
             inputs[name] = head
     manifest = Manifest(version=candidate.version, repos=repos, inputs=inputs)

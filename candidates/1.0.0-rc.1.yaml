@@ -13,3 +13,18 @@ repos:
   chock-site:            [11, 78, 80]
   chock-quickstart:      []
   chock-example:         []
+# Paths the candidate rewrites on `rc` after assembly (rc.py pins, then chock-site's own regeneration:
+# sitegen cliexamples --record, catalogdoc, writedoc --record, docsource, agentseamdoc snapshot and
+# run --record). A merge conflict confined to these is resolved by taking the PR's side; anything
+# else still refuses.
+regenerated:
+  chock-site:
+    - .framework-ref
+    - .catalog-ref
+    - data/catalog-source/**
+    - data/docs-source/**
+    - data/write-source/**
+    - data/cli-examples/**
+    - data/agentseam-source/**
+    - data/agentseam-run.json
+    - data/kinds/engine-commit.txt

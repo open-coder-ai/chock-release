@@ -5,7 +5,10 @@
             exist (else check it out and merge origin/main in), merge each listed PR from
             refs/pull/<n>/head with a merge commit (--no-ff), and push `rc` fast-forward only.
             A PR that is not open, a conflict, or a push that is not a fast-forward stops that repo
-            with the repo and PR printed; nothing is pushed for it. Other repos still run.
+            with the repo and PR printed; nothing is pushed for it. Other repos still run. The one
+            exception: a conflict in a PR merge confined to paths the candidate file lists under
+            `regenerated:` for that repo (rewritten by pins and the site's regeneration right after)
+            is resolved by taking the PR's version and noted in the merge commit and the output.
   pins      One commit on chock-site's `rc` setting .catalog-ref and .framework-ref to the
             catalog's and the engine's `rc` heads, pushed fast-forward only.
   status    Each repo's `rc` head, which listed PRs it contains, whether main moved under it, and
@@ -35,6 +38,7 @@ from __future__ import annotations
 import argparse
 import base64
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -55,6 +59,25 @@ REGENERATE = (
     "catalogdoc snapshot (the catalog pages snapshot; use the command chock-site documents for it). "
     "The regeneration commit goes on rc only, never on main."
 )
+
+
+def glob_match(pattern: str, path: str) -> bool:
+    """Path glob: `**` crosses directories, `*` and `?` stay inside one; the whole path must match."""
+    out, i = [], 0
+    while i < len(pattern):
+        if pattern.startswith("**", i):
+            out.append(".*")
+            i += 2
+        elif pattern[i] == "*":
+            out.append("[^/]*")
+            i += 1
+        elif pattern[i] == "?":
+            out.append("[^/]")
+            i += 1
+        else:
+            out.append(re.escape(pattern[i]))
+            i += 1
+    return re.fullmatch("".join(out), path) is not None
 
 
 class Refused(Exception):
@@ -194,7 +217,7 @@ class Rc:
         git.run(["clone", "--quiet", "--no-tags", git.url_for(repo), str(dest)])
         if existing and not reset:
             git.run(["checkout", "--quiet", "-B", BRANCH, f"origin/{BRANCH}"], dest)
-            self.merge(dest, repo, f"origin/{base}", f"Merge {base} into {BRANCH}", f"{base}")
+            self.merge(dest, repo, f"origin/{base}", f"Merge {base} into {BRANCH}", f"{base}")  # never takes a side
         else:
             git.run(["checkout", "--quiet", "-B", BRANCH, f"origin/{base}"], dest)
         for n, sha in prs.items():
@@ -203,7 +226,7 @@ class Rc:
             got = git.run(["rev-parse", local], dest).stdout.strip()
             if got != sha:
                 raise Refused(f"PR #{n} moved while assembling (GitHub said {sha[:12]}, fetched {got[:12]})")
-            self.merge(dest, repo, local, f"Merge pull request #{n} into {BRANCH}", f"PR #{n}")
+            self.merge(dest, repo, local, f"Merge pull request #{n} into {BRANCH}", f"PR #{n}", pr=n)
 
         head = git.run(["rev-parse", "HEAD"], dest).stdout.strip()
         if head == existing:
@@ -226,8 +249,13 @@ class Rc:
             )
         self.out(f"{repo}: {BRANCH} {(existing or 'new')[:12]} -> {head[:12]} (merged {listed})")
 
-    def merge(self, dest: Path, repo: str, ref: str, message: str, label: str) -> None:
-        """Merge <ref> into HEAD with a merge commit; a conflict aborts and refuses with the repo and PR."""
+    def merge(self, dest: Path, repo: str, ref: str, message: str, label: str, pr: int | None = None) -> None:
+        """Merge <ref> into HEAD with a merge commit; a conflict aborts and refuses with the repo and PR.
+
+        For a PR merge (pr given) a conflict confined to paths the candidate declares `regenerated` for
+        this repo is resolved by taking the PR's version: the next pins and regeneration step rewrites
+        those paths anyway. Any other conflict still refuses, naming the paths outside the list.
+        """
         git = self.git
         if git.run(["merge-base", "--is-ancestor", ref, "HEAD"], dest, ok=True).returncode == 0:
             return  # already contained: a repeat round adds nothing
@@ -235,10 +263,39 @@ class Rc:
         if proc.returncode == 0:
             return
         unmerged = git.run(["diff", "--name-only", "--diff-filter=U"], dest, ok=True).stdout.split()
+        globs = self.cand.regenerated.get(repo, [])
+        if pr is not None and unmerged:
+            outside = [p for p in unmerged if not any(glob_match(g, p) for g in globs)]
+            if not outside:
+                self.take_pr_side(dest, repo, message, pr, unmerged)
+                return
+            if globs:
+                git.run(["merge", "--abort"], dest, ok=True)
+                raise Refused(
+                    f"CONFLICT merging {label} into {BRANCH} ({', '.join(unmerged[:5])}); "
+                    f"outside the regenerated paths: {', '.join(outside)}"
+                )
         git.run(["merge", "--abort"], dest, ok=True)
         if unmerged:
             raise Refused(f"CONFLICT merging {label} into {BRANCH} ({', '.join(unmerged[:5])})")
         raise Refused(f"cannot merge {label} into {BRANCH}: {(proc.stdout + proc.stderr).strip()[-300:]}")
+
+    def take_pr_side(self, dest: Path, repo: str, message: str, pr: int, paths: list[str]) -> None:
+        """Resolve each conflicting path to the PR's version (its deletion too) and complete the merge commit."""
+        git = self.git
+        try:
+            for path in paths:
+                if git.run(["ls-files", "-u", "--", path], dest).stdout.count(" 3\t"):
+                    git.run(["checkout", "--theirs", "--", path], dest)
+                    git.run(["add", "--", path], dest)
+                else:  # the PR deleted it
+                    git.run(["rm", "--quiet", "--", path], dest)
+            line = f"conflicts in regenerated paths taken from PR #{pr}: {', '.join(paths)}"
+            git.run(["commit", "--quiet", "--signoff", "-m", message, "-m", line], dest)
+        except Refused:
+            git.run(["merge", "--abort"], dest, ok=True)
+            raise
+        self.out(f"{repo}: {line}")
 
     # pins --------------------------------------------------------------------------------
 

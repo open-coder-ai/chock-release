@@ -58,6 +58,7 @@ class Remote:
             git("fetch", "--quiet", "origin", base, cwd=work)
             git("checkout", "--quiet", "-B", "tmp", "FETCH_HEAD", cwd=work)
         for name, text in files.items():
+            (work / name).parent.mkdir(parents=True, exist_ok=True)
             (work / name).write_text(text, encoding="utf-8")
         git("add", ".", cwd=work)
         git("commit", "--quiet", "-m", f"fixture {sorted(files)}", cwd=work)
@@ -159,10 +160,10 @@ class LocalGH(check.GitHub):
         raise AssertionError(f"unexpected GET {path}")
 
 
-def candidate(**prs: list[int]) -> check.Candidate:
+def candidate(regenerated: dict[str, list[str]] | None = None, **prs: list[int]) -> check.Candidate:
     table = {repo: [] for repo in check.TRAIN}
     table.update({repo.replace("_", "-"): numbers for repo, numbers in prs.items()})
-    return check.Candidate(version=VERSION, rc=1, base="main", prs=table)
+    return check.Candidate(version=VERSION, rc=1, base="main", prs=table, regenerated=regenerated or {})
 
 
 class Lines:
@@ -258,6 +259,87 @@ def test_conflict_stops_that_repo_prints_repo_and_pr_and_pushes_nothing(remote, 
     assert refusal and "CONFLICT" in refusal[0] and "PR #2" in refusal[0] and "nothing pushed for chock" in refusal[0]
     assert remote.head("chock", "refs/heads/rc") is None  # not even PR #1 reached the remote
     assert remote.head("chock-site", "refs/heads/rc")  # the other repos still ran
+
+
+SITE_GLOBS = {"chock-site": [".framework-ref", "data/snap/**"]}
+
+
+def conflicting_site(remote, extra: dict[str, str] | None = None) -> None:
+    """rc holds PR 1's pins and snapshot; PR 2 rewrites the same files (and `extra`) differently."""
+    remote.pr("chock-site", 1, {".framework-ref": "rc-pin\n", "data/snap/a.json": "rc\n"})
+    remote.pr("chock-site", 2, {".framework-ref": "pr-pin\n", "data/snap/a.json": "pr\n", **(extra or {})})
+
+
+def test_conflict_confined_to_regenerated_paths_takes_the_pr_side(remote, gh):
+    conflicting_site(remote)
+    r, lines = make(remote, gh, candidate(SITE_GLOBS, chock_site=[1, 2]))
+    assert r.assemble(reset=False) == 0, lines.err
+    show = lambda path: git("-C", str(remote.path("chock-site")), "show", f"rc:{path}")  # noqa: E731
+    assert show(".framework-ref") == "pr-pin" and show("data/snap/a.json") == "pr"
+    body = git("-C", str(remote.path("chock-site")), "log", "-1", "--format=%B", "rc")
+    line = "conflicts in regenerated paths taken from PR #2: .framework-ref, data/snap/a.json"
+    assert line in body and "Signed-off-by: Jothi Mani Rajendran" in body
+    assert len(remote.log("chock-site", fmt="%P")[0].split()) == 2  # a merge commit
+    assert f"chock-site: {line}" in lines.out
+
+
+def test_conflict_partly_outside_the_regenerated_paths_refuses_naming_them(remote, gh):
+    remote.pr("chock-site", 1, {".framework-ref": "rc-pin\n", "app.txt": "line1\nfrom one\nline3\n"})
+    remote.pr("chock-site", 2, {".framework-ref": "pr-pin\n", "app.txt": "line1\nfrom two\nline3\n"})
+    r, lines = make(remote, gh, candidate(SITE_GLOBS, chock_site=[1, 2]))
+    assert r.assemble(reset=False) == 1
+    refusal = [e for e in lines.err if e.startswith("REFUSED chock-site:")]
+    assert refusal and "outside the regenerated paths: app.txt" in refusal[0] and "PR #2" in refusal[0]
+    assert ".framework-ref" not in refusal[0].split("outside the regenerated paths:")[1]
+    assert remote.head("chock-site", "refs/heads/rc") is None  # nothing pushed
+
+
+def test_a_repo_without_a_regenerated_entry_refuses_a_conflict_as_before(remote, gh):
+    conflicting_site(remote)
+    r, lines = make(remote, gh, candidate({"chock": ["*.txt"]}, chock_site=[1, 2]))
+    assert r.assemble(reset=False) == 1
+    refusal = [e for e in lines.err if e.startswith("REFUSED chock-site:")]
+    assert refusal and "CONFLICT" in refusal[0] and "outside" not in refusal[0]
+    assert remote.head("chock-site", "refs/heads/rc") is None
+
+
+def test_regenerated_paths_never_excuse_a_conflict_with_main(remote, gh):
+    remote.pr("chock-site", 1, {".framework-ref": "pr-pin\n"})
+    r, _ = make(remote, gh, candidate(SITE_GLOBS, chock_site=[1]))
+    assert r.assemble(reset=False) == 0
+    remote.commit("chock-site", "main", {".framework-ref": "main-pin\n"})
+    remote.commit("chock-site", "rc", {".framework-ref": "rc-pin\n"})
+    r, lines = make(remote, gh, candidate(SITE_GLOBS, chock_site=[1]))
+    assert r.assemble(reset=False) == 1
+    assert any(e.startswith("REFUSED chock-site:") and "CONFLICT merging main" in e for e in lines.err)
+
+
+def test_a_path_the_pr_deleted_is_taken_as_deleted(remote, gh):
+    remote.commit("chock-site", "main", {"data/snap/a.json": "main\n"})
+    remote.pr("chock-site", 1, {"data/snap/a.json": "rc\n"})
+    work = remote.root / "work-delete"
+    git("clone", "--quiet", str(remote.path("chock-site")), str(work))
+    git("rm", "--quiet", "data/snap/a.json", cwd=work)
+    git("commit", "--quiet", "-m", "delete", cwd=work)
+    git("push", "--quiet", "-f", "origin", "HEAD:refs/pull/2/head", cwd=work)
+    r, lines = make(remote, gh, candidate(SITE_GLOBS, chock_site=[1, 2]))
+    assert r.assemble(reset=False) == 0, lines.err
+    assert "data/snap/a.json" not in git("-C", str(remote.path("chock-site")), "ls-tree", "-r", "--name-only", "rc")
+
+
+@pytest.mark.parametrize(
+    ("pattern", "path", "hit"),
+    [
+        (".framework-ref", ".framework-ref", True),
+        (".framework-ref", "sub/.framework-ref", False),
+        ("data/x/**", "data/x/a/b.json", True),
+        ("data/x/*", "data/x/a/b.json", False),
+        ("data/x/**", "data/xy/a.json", False),
+        ("data/?.txt", "data/a.txt", True),
+    ],
+)
+def test_glob_match(pattern, path, hit):
+    assert rc.glob_match(pattern, path) is hit
 
 
 def test_pr_that_is_not_open_is_refused_before_anything_is_cloned(remote, gh):
@@ -425,7 +507,8 @@ def test_the_shipped_candidate_file_is_valid_and_matches_ir_3():
     result = check.Result()
     cand = check.load_candidate(SHIPPED, result)
     assert cand is not None, result.errors
-    assert cand.prs["chock-site"] == [11, 78] and cand.prs["chock"] == [314, 315]
+    assert cand.prs["chock-site"] == [11, 78, 80] and cand.prs["chock"] == [314, 315]
+    assert set(cand.regenerated) == {"chock-site"} and ".framework-ref" in cand.regenerated["chock-site"]
     assert cand.prs["chock-quickstart"] == [] and cand.prs["chock-example"] == []
     assert yaml.safe_load((SHIPPED).read_text())["base"] == "main"
 

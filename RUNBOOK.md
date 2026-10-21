@@ -139,6 +139,15 @@ A round:
    open, a conflict, or a push that is not a fast-forward stops that repo with the repo
    and PR printed and nothing pushed for it; the other repos still run. Commits are
    authored as the owner with a sign-off.
+   The candidate file may carry an optional top-level `regenerated:` mapping, repo to path globs
+   (`**` crosses directories, `*` stays in one) that the candidate rewrites on `rc` after assembly:
+   chock-site's two pins and its recorded engine, catalog and agentseam snapshots. When a PR merge
+   conflicts only in paths matching that repo's list, `assemble` takes the PR's version of each
+   (a deletion too) and completes the merge commit with the line "conflicts in regenerated paths
+   taken from PR #n: <paths>", which it also prints, because `pins` and the regeneration rewrite
+   those paths right after. It resolves nothing else: a conflict with any path outside the list, a
+   conflict merging `main` into `rc`, and a repo with no entry all refuse as before, naming the
+   paths outside the list. Rebuilding `rc` stays the owner's `--reset`.
 3. `python rc.py pins candidates/X.Y.Z-rc.N.yaml` adds one commit on chock-site's `rc`
    setting `.catalog-ref` and `.framework-ref` to the catalog's and the engine's `rc`
    heads, so the site build of `rc` is the candidate. Moving the two pins is not enough: the

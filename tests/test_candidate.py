@@ -308,6 +308,58 @@ def test_candidate_shape_refusals(candidate_file, mutate, needle):
     assert errors(result, needle), result.errors
 
 
+@pytest.mark.parametrize(
+    ("value", "needle"),
+    [
+        ("chock-site", "'regenerated' must be a mapping"),
+        ({"context-report": ["a"]}, "regenerated.context-report is not in the train"),
+        ({"chock-site": ".catalog-ref"}, "regenerated.chock-site must be a list of non-empty path globs"),
+        ({"chock-site": [""]}, "regenerated.chock-site must be a list of non-empty path globs"),
+        ({"chock-site": [3]}, "regenerated.chock-site must be a list of non-empty path globs"),
+    ],
+)
+def test_regenerated_shape_refusals(candidate_file, value, needle):
+    data = {"version": VERSION, "base": "main", "repos": {repo: [] for repo in check.TRAIN}, "regenerated": value}
+    result = check.Result()
+    assert check.load_candidate(candidate_file(data), result) is None
+    assert errors(result, needle), result.errors
+
+
+def test_regenerated_is_optional_and_loaded(candidate_file):
+    data = {"version": VERSION, "base": "main", "repos": {repo: [] for repo in check.TRAIN}}
+    result = check.Result()
+    assert check.load_candidate(candidate_file(data), result).regenerated == {}
+    data["regenerated"] = {"chock-site": [".catalog-ref", "data/**"]}
+    assert check.load_candidate(candidate_file(data), result).regenerated == data["regenerated"]
+    assert result.ok
+
+
+AGENTSEAM_DOWN = {f"/repos/{check.OWNER}/{check.AGENTSEAM}": "GET agentseam: HTTP 403"}
+
+
+def test_agentseam_api_error_is_a_warning_in_candidate_mode(cworld, candidate_file):
+    cworld.errors.update(AGENTSEAM_DOWN)
+    manifest, result = run_candidate(cworld, candidate_file())
+    assert result.ok, result.errors
+    assert warnings(result, f"{check.AGENTSEAM}: GitHub API error: GET agentseam: HTTP 403")
+    assert check.AGENTSEAM not in manifest.inputs
+
+
+def test_agentseam_api_error_still_refuses_in_manifest_mode(tmp_path):
+    world = World.consistent()
+    world.errors.update(AGENTSEAM_DOWN)
+    path = tmp_path / "manifest.yaml"
+    path.write_text(yaml.safe_dump(world.manifest(), sort_keys=False), encoding="utf-8")
+    _, result = check.check(path, world)
+    assert errors(result, f"{check.AGENTSEAM}: GitHub API error")
+
+
+def test_a_train_repo_api_error_still_refuses_in_candidate_mode(cworld, candidate_file):
+    cworld.errors[f"/repos/{check.OWNER}/chock-catalog/contents/"] = "GET x: HTTP 500"
+    _, result = run_candidate(cworld, candidate_file())
+    assert errors(result, "chock-catalog: GitHub API error")
+
+
 def test_candidate_needs_its_name_and_a_candidate_shape(candidate_file, cworld):
     result = check.Result()
     assert check.load_candidate(candidate_file(name="candidate.yaml"), result) is None
