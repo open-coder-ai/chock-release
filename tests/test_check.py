@@ -811,14 +811,18 @@ def test_main_reads_token_from_environment_only(monkeypatch, tmp_path, capsys):
 
 
 def test_no_real_versions_outside_releases():
-    """Real versions live only in releases/. Code, tests and docs use placeholders."""
+    """Real versions live only in releases/ and candidates/. Code, tests and docs use placeholders."""
     tracked = subprocess.run(
         ["git", "ls-files", "-z"], cwd=ROOT, capture_output=True, text=True, check=True
     ).stdout.split("\0")
     offenders = []
     for name in filter(None, tracked):
         path = ROOT / name
-        if name.startswith(("releases/", "requirements/")) or path == Path(__file__) or not path.is_file():
+        if (
+            name.startswith(("releases/", "candidates/", "requirements/"))
+            or path == Path(__file__)
+            or not path.is_file()
+        ):
             continue
         if b"1.0.0" in path.read_bytes():
             offenders.append(name)

@@ -19,6 +19,9 @@ from conftest import ROOT, VERSION
 
 OWNER_EMAIL = "250249270+jothimani-rajendran@users.noreply.github.com"
 
+# The one candidate file the repo ships.
+SHIPPED = next(iter(sorted((ROOT / "candidates").glob("*-rc.*.yaml"))))
+
 
 def git(*args: str, cwd: Path | None = None) -> str:
     argv = ["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false"]
@@ -264,11 +267,11 @@ def test_push_that_is_not_a_fast_forward_is_refused_and_never_forced(remote, gh)
 
 def test_reset_without_the_owner_flag_is_refused_before_any_work(monkeypatch, capsys):
     monkeypatch.setattr(check, "GitHub", lambda token=None: pytest.fail("no GitHub call may precede the refusal"))
-    code = rc.main(["assemble", str(ROOT / "candidates" / "1.0.0-rc.1.yaml"), "--reset"])
+    code = rc.main(["assemble", str(SHIPPED), "--reset"])
     assert code == 1
     assert "needs --i-am-the-owner" in capsys.readouterr().err
     # --dry-run does not soften it
-    assert rc.main(["assemble", str(ROOT / "candidates" / "1.0.0-rc.1.yaml"), "--reset", "--dry-run"]) == 1
+    assert rc.main(["assemble", str(SHIPPED), "--reset", "--dry-run"]) == 1
 
 
 def test_reset_with_the_owner_flag_recreates_rc_from_main(remote, gh):
@@ -303,7 +306,7 @@ def test_candidate_file_with_an_unknown_verb_or_missing_file_is_a_usage_error(tm
     with pytest.raises(SystemExit) as exc:
         rc.main(["tag", str(tmp_path / "x.yaml")])
     assert exc.value.code == 2
-    assert rc.main(["status", str(tmp_path / "1.0.0-rc.1.yaml")]) == 1
+    assert rc.main(["status", str(tmp_path / f"{VERSION}-rc.1.yaml")]) == 1
 
 
 # pins -------------------------------------------------------------------------------------
@@ -381,8 +384,8 @@ def test_github_only_over_https_and_token_never_in_argv_or_errors(remote):
 
 def test_the_shipped_candidate_file_is_valid_and_matches_ir_3():
     result = check.Result()
-    cand = check.load_candidate(ROOT / "candidates" / "1.0.0-rc.1.yaml", result)
+    cand = check.load_candidate(SHIPPED, result)
     assert cand is not None, result.errors
     assert cand.prs["chock-site"] == [11, 78] and cand.prs["chock"] == [314, 315]
     assert cand.prs["chock-quickstart"] == [] and cand.prs["chock-example"] == []
-    assert yaml.safe_load((ROOT / "candidates" / "1.0.0-rc.1.yaml").read_text())["base"] == "main"
+    assert yaml.safe_load((SHIPPED).read_text())["base"] == "main"

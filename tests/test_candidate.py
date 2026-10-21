@@ -9,6 +9,8 @@ import check
 import release
 from conftest import ROOT, VERSION, World, sha
 
+# The one candidate file the repo ships.
+SHIPPED = next(iter(sorted((ROOT / "candidates").glob("*-rc.*.yaml"))))
 RC = "rc"
 
 
@@ -299,7 +301,7 @@ def test_candidate_needs_its_name_and_a_candidate_shape(candidate_file, cworld):
 
 def test_the_shipped_candidate_passes_the_shape_check():
     result = check.Result()
-    assert check.load_candidate(ROOT / "candidates" / "1.0.0-rc.1.yaml", result) is not None, result.errors
+    assert check.load_candidate(SHIPPED, result) is not None, result.errors
 
 
 # release.py and the release check refuse a candidate ---------------------------------------
