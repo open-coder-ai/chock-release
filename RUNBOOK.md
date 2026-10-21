@@ -142,12 +142,17 @@ A round:
 3. `python rc.py pins candidates/X.Y.Z-rc.N.yaml` adds one commit on chock-site's `rc`
    setting `.catalog-ref` and `.framework-ref` to the catalog's and the engine's `rc`
    heads, so the site build of `rc` is the candidate.
-4. `python rc.py status candidates/X.Y.Z-rc.N.yaml` prints each repo's `rc` head, which
+4. `python rc.py status candidates/X.Y.Z-rc.N.yaml` (also `assemble`) takes `--only <repo>`,
+   repeatable, to cover part of the train, for a session whose GitHub scope reaches one
+   repo; a repo not in the candidate file is a usage error. `status` prints each repo's `rc` head, which
    listed PRs it contains, and whether `main` has moved under it.
 5. `python check.py --candidate candidates/X.Y.Z-rc.N.yaml --plan` is the release check
    against the `rc` heads, by the same code paths. Checks 1 (on `rc`, not the default
-   branch), 2, 4a, 5, 6a and 7 refuse. Checks 3, 4b and 6b, the version files, warn until
-   REL-5 lands. Checks 8 and 9 (tags) are skipped. A required job that is red on `rc` and
+   branch), 2, 6a and 7 refuse. Checks 3, 4b and 6b, the version files, warn until
+   REL-5 lands. Checks 4a and 5 (the catalog's `.framework-ref`, the plugins'
+   `generated_from`) warn too: the owner's adopt-framework run and the plugin
+   regeneration (REL-4) set those pins at release prep, never `rc.py`. Only the site's
+   pins (6a) are moved by `rc.py pins`, so 6a refuses. Checks 8 and 9 (tags) are skipped. A required job that is red on `rc` and
    also red on the repo's default branch is printed as `known red` and is a warning
    (the plugin repos' `verify`, for example). `main` having moved under `rc` is a
    warning. The plan prints "candidate: nothing is tagged, published or moved".

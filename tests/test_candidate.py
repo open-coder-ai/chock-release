@@ -119,22 +119,41 @@ def test_ci_must_be_green_on_rc(cworld, candidate_file):
 @pytest.mark.parametrize(
     "mutate, needle",
     [
-        (
-            lambda w: w.put("chock-catalog", ".framework-ref", sha("other") + "\n"),
-            "check 4: chock-catalog: .framework-ref",
-        ),
-        (
-            lambda w: w.put("chock-codex-plugins", "generated_from.yaml", "generated_from: {catalog: x, engine: y}"),
-            "check 5: chock-codex-plugins",
-        ),
         (lambda w: w.put("chock-site", ".catalog-ref", sha("other") + "\n"), "check 6: chock-site: .catalog-ref"),
         (lambda w: w.put("chock-example", "requirements.txt", "chock==1.2.3\n"), "check 7: chock-example"),
     ],
 )
-def test_checks_4a_5_6a_7_refuse(cworld, candidate_file, mutate, needle):
+def test_checks_6a_7_refuse(cworld, candidate_file, mutate, needle):
     mutate(cworld)
     _, result = run_candidate(cworld, candidate_file())
     assert errors(result, needle)
+
+
+PIN_BREAKS = [
+    (lambda w: w.put("chock-catalog", ".framework-ref", sha("other") + "\n"), "check 4: chock-catalog: .framework-ref"),
+    (
+        lambda w: w.put("chock-codex-plugins", "generated_from.yaml", "generated_from: {catalog: x, engine: y}"),
+        "check 5: chock-codex-plugins",
+    ),
+]
+
+
+@pytest.mark.parametrize("mutate, needle", PIN_BREAKS)
+def test_checks_4a_and_5_only_warn_in_candidate_mode(cworld, candidate_file, mutate, needle):
+    mutate(cworld)
+    _, result = run_candidate(cworld, candidate_file())
+    assert result.ok, result.errors
+    assert warnings(result, needle), result.warnings
+
+
+@pytest.mark.parametrize("mutate, needle", PIN_BREAKS)
+def test_checks_4a_and_5_still_refuse_in_manifest_mode(tmp_path, mutate, needle):
+    w = World.consistent()
+    mutate(w)
+    path = tmp_path / f"{VERSION}.yaml"
+    path.write_text(yaml.safe_dump(w.manifest()), encoding="utf-8")
+    _, result = check.check(path, w, VERSION)
+    assert errors(result, needle) and result.warnings == []
 
 
 @pytest.mark.parametrize(

@@ -22,10 +22,11 @@ The numbered checks follow org-plan plan/release-1.md:
 9. An existing v<version> tag at the manifest commit passes; at any other commit, refuses.
 
 Candidate mode (--candidate candidates/<version>-rc.<n>.yaml) runs the same code paths
-against each repo's `rc` head instead of a manifest commit. Checks 1 (on `rc`), 2, 4a, 5,
-6a and 7 refuse; 3, 4b and 6b (the version files) warn until REL-5 lands; 8 and 9 are
-skipped, because nothing is tagged, published or moved. A required job that is also red
-on the repo's default branch is a warning ("known red"), not a refusal.
+against each repo's `rc` head instead of a manifest commit. Checks 1 (on `rc`), 2, 6a and 7
+refuse; 3, 4a, 4b, 5 and 6b warn: the version files until REL-5 lands, and the catalog's and
+the plugins' pins because the owner's adopt-framework run and REL-4's regeneration set them at
+release prep, never rc.py. 8 and 9 are skipped, because nothing is tagged, published or moved.
+A required job that is also red on the repo's default branch is a warning ("known red"), not a refusal.
 
 Credentials come only from the environment (GITHUB_TOKEN). They are never printed.
 
@@ -598,9 +599,9 @@ class Checker:
     # 4
     def catalog(self) -> None:
         engine = self.m.repos.get(ENGINE)
-        ref = self._ref(CATALOG, FRAMEWORK_REF_FILE)
+        ref = self._ref(CATALOG, FRAMEWORK_REF_FILE, soft=True)
         if ref is not None and ref != engine:
-            self.r.refuse(f"check 4: {CATALOG}: {FRAMEWORK_REF_FILE} is {ref!r}, engine commit is {engine!r}")
+            self._refuse(f"check 4: {CATALOG}: {FRAMEWORK_REF_FILE} is {ref!r}, engine commit is {engine!r}", soft=True)
         version = self._ref(CATALOG, CATALOG_VERSION_FILE, soft=True)
         if version is not None and version != self.m.version:
             self._refuse(
@@ -610,7 +611,7 @@ class Checker:
 
     # 5
     def plugin(self, repo: str) -> None:
-        text = self._file(repo, PLUGIN_PROVENANCE_FILE)
+        text = self._file(repo, PLUGIN_PROVENANCE_FILE, soft=True)
         if text is None:
             return
         try:
@@ -618,13 +619,14 @@ class Checker:
             gen = data["generated_from"]
             recorded = {"catalog": gen.get("catalog"), "engine": gen.get("engine")}
         except (yaml.YAMLError, KeyError, TypeError, AttributeError):
-            self.r.refuse(f"check 5: {repo}: {PLUGIN_PROVENANCE_FILE} has no generated_from mapping")
+            self._refuse(f"check 5: {repo}: {PLUGIN_PROVENANCE_FILE} has no generated_from mapping", soft=True)
             return
         for key, source in (("catalog", CATALOG), ("engine", ENGINE)):
             want = self.m.repos.get(source)
             if recorded[key] != want:
-                self.r.refuse(
-                    f"check 5: {repo}: generated_from.{key} is {recorded[key]!r}, manifest {source} is {want!r}"
+                self._refuse(
+                    f"check 5: {repo}: generated_from.{key} is {recorded[key]!r}, manifest {source} is {want!r}",
+                    soft=True,
                 )
 
     # 6

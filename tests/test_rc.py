@@ -389,3 +389,38 @@ def test_the_shipped_candidate_file_is_valid_and_matches_ir_3():
     assert cand.prs["chock-site"] == [11, 78] and cand.prs["chock"] == [314, 315]
     assert cand.prs["chock-quickstart"] == [] and cand.prs["chock-example"] == []
     assert yaml.safe_load((SHIPPED).read_text())["base"] == "main"
+
+
+# --only -----------------------------------------------------------------------------------
+
+
+def test_only_limits_assemble_and_status_to_the_named_repos(remote, gh):
+    remote.pr("chock", 1, {"one.txt": "1\n"})
+    remote.pr("chock-site", 5, {"site.txt": "ok\n"})
+    lines = Lines()
+    r = rc.Rc(
+        gh,
+        rc.Git(url_for=remote.url, protocols="file"),
+        candidate(chock=[1], chock_site=[5]),
+        False,
+        out=lines,
+        only=["chock-site"],
+    )
+    assert r.assemble(reset=False) == 0, lines.err
+    assert remote.head("chock-site", "refs/heads/rc") and remote.head("chock", "refs/heads/rc") is None
+    assert r.status() == 0
+    rows = [line for line in lines.out if line.split()[0] in check.TRAIN and "rc " in line]
+    assert [line.split()[0] for line in rows] == ["chock-site"]
+
+
+def test_only_is_repeatable_and_a_repo_outside_the_candidate_is_a_usage_error(capsys):
+    cand = str(SHIPPED)
+    for argv in (
+        ["status", cand, "--only", "context-report"],
+        ["assemble", cand, "--only", "chock", "--only", "nope", "--dry-run"],
+        ["pins", cand, "--only", "chock-site"],
+    ):
+        with pytest.raises(SystemExit) as exc:
+            rc.main(argv)
+        assert exc.value.code == 2
+    assert "not in" in capsys.readouterr().err

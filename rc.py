@@ -10,6 +10,8 @@
             catalog's and the engine's `rc` heads, pushed fast-forward only.
   status    Each repo's `rc` head, which listed PRs it contains, and whether main moved under it.
 
+assemble and status take --only <repo> (repeatable) to cover part of the train, for a session whose
+GitHub scope reaches one repo; a repo that is not in the candidate file is a usage error.
 Every verb takes --dry-run: it prints the plan, reads GitHub, and touches nothing.
 `assemble --reset` deletes and recreates `rc` from main. That is the owner's: it is refused unless
 --i-am-the-owner is also given, and an agent never passes that flag.
@@ -92,12 +94,19 @@ class Git:
 
 
 class Rc:
-    def __init__(self, gh: check.GitHub, git: Git, cand: check.Candidate, dry_run: bool, out=print):
+    def __init__(
+        self, gh: check.GitHub, git: Git, cand: check.Candidate, dry_run: bool, out=print, only: list[str] | None = None
+    ):
         self.gh = gh
         self.git = git
         self.cand = cand
         self.dry_run = dry_run
         self.out = out
+        self.only = only
+
+    def repos(self) -> list[str]:
+        """The train repos this run covers: all of them, or those named with --only."""
+        return [repo for repo in check.TRAIN if not self.only or repo in self.only]
 
     # GitHub reads ------------------------------------------------------------------------
 
@@ -135,7 +144,7 @@ class Rc:
     def assemble(self, reset: bool) -> int:
         failed = 0
         with tempfile.TemporaryDirectory(prefix="chock-rc-") as tmp:
-            for repo in check.TRAIN:
+            for repo in self.repos():
                 try:
                     self.assemble_repo(repo, Path(tmp) / repo, reset)
                 except Refused as exc:
@@ -255,7 +264,7 @@ class Rc:
     def status(self) -> int:
         failed = 0
         base = self.cand.base
-        for repo in check.TRAIN:
+        for repo in self.repos():
             try:
                 head = self.rc_head(repo)
                 if head is None:
@@ -291,11 +300,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("verb", choices=["assemble", "pins", "status"])
     parser.add_argument("candidate", type=Path, help="candidates/<version>-rc.<n>.yaml")
     parser.add_argument("--dry-run", action="store_true", help="print the plan; change nothing")
+    parser.add_argument("--only", action="append", metavar="REPO", help="assemble, status: only this repo (repeatable)")
     parser.add_argument("--reset", action="store_true", help="assemble: delete and recreate rc from main (owner only)")
     parser.add_argument(
         "--i-am-the-owner", action="store_true", help="the owner's flag for --reset; an agent never passes it"
     )
     args = parser.parse_args(argv)
+    if args.only and args.verb == "pins":
+        parser.error("--only belongs to assemble and status")
     if args.reset and args.verb != "assemble":
         parser.error("--reset belongs to assemble")
     if args.reset and not args.i_am_the_owner:
@@ -313,8 +325,19 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  - {err}", file=sys.stderr)
         return 1
 
+    unknown = [name for name in args.only or [] if name not in cand.prs]
+    if unknown:
+        parser.error(f"--only names {', '.join(unknown)}, which is not in {args.candidate.name}")
+
     token = os.environ.get("GITHUB_TOKEN") or None
-    rc = Rc(check.GitHub(token=token), Git(token=token), cand, args.dry_run, out=lambda *a, **k: print(*a, **k))
+    rc = Rc(
+        check.GitHub(token=token),
+        Git(token=token),
+        cand,
+        args.dry_run,
+        out=lambda *a, **k: print(*a, **k),
+        only=args.only,
+    )
     if args.verb == "assemble":
         if args.dry_run:
             print(f"Dry run: assemble {args.candidate.name}{' --reset' if args.reset else ''} (nothing is touched)")
