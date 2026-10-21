@@ -10,6 +10,6 @@ repos:
   chock-codex-plugins:   [15]
   chock-copilot-plugins: [14]
   chock-devin-plugins:   [9]
-  chock-site:            [11, 78]
+  chock-site:            [11, 78, 80]
   chock-quickstart:      []
   chock-example:         []
