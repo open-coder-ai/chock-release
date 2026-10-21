@@ -288,6 +288,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--timeout", type=int, default=1800, help="seconds to wait (pypi, verify)")
     args = parser.parse_args(argv)
 
+    if check.looks_like_candidate(args.manifest):
+        print(
+            f"REFUSED: {args.manifest.name} is a release candidate, not a manifest; nothing was changed",
+            file=sys.stderr,
+        )
+        return 1
     gh = GitHubWriter(token=os.environ.get("GITHUB_TOKEN") or None)
     manifest, result = check.check(args.manifest, gh, args.expect_version)
     if not result.ok or manifest is None:

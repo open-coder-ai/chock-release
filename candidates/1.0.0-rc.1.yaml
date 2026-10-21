@@ -1,0 +1,15 @@
+# Release candidate 1.0.0-rc.1: the PRs to merge into each train repo's `rc` branch, in order.
+# Source: org-plan plan/internal-release.md, IR-3. Nothing here is tagged or published.
+version: 1.0.0
+base: main
+repos:
+  chock:                 [314, 315]
+  chock-catalog:         [293]
+  chock-claude-plugins:  [16]
+  chock-cursor-plugins:  [15]
+  chock-codex-plugins:   [15]
+  chock-copilot-plugins: [14]
+  chock-devin-plugins:   [9]
+  chock-site:            [11, 78]
+  chock-quickstart:      []
+  chock-example:         []

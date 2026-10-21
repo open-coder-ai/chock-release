@@ -21,6 +21,12 @@ The numbered checks follow org-plan plan/release-1.md:
 8. No v<version> tag exists yet in any train repo, except as allowed by 9.
 9. An existing v<version> tag at the manifest commit passes; at any other commit, refuses.
 
+Candidate mode (--candidate candidates/<version>-rc.<n>.yaml) runs the same code paths
+against each repo's `rc` head instead of a manifest commit. Checks 1 (on `rc`), 2, 4a, 5,
+6a and 7 refuse; 3, 4b and 6b (the version files) warn until REL-5 lands; 8 and 9 are
+skipped, because nothing is tagged, published or moved. A required job that is also red
+on the repo's default branch is a warning ("known red"), not a refusal.
+
 Credentials come only from the environment (GITHUB_TOKEN). They are never printed.
 
 Exit codes: 0 consistent, 1 mismatches found, 2 usage error.
@@ -96,6 +102,12 @@ SITE_AGENTSEAM_FILE = "data/agentseam-source/source.json"  # {"agentseam_ref": <
 PIN_FILES = ("README.md", "docs/README.md", "requirements.txt", "pyproject.toml")
 
 SEMVER = re.compile(r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)")
+CANDIDATE_NAME = re.compile(r"((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))-rc\.([1-9]\d*)\.yaml")
+CANDIDATE_BRANCH = "rc"
+CANDIDATE_BASE = "main"
+NOTHING_MOVED = "candidate: nothing is tagged, published or moved"
+# A required job that concluded like this is red; anything else not green (queued, skipped) is not "known red".
+RED_CONCLUSIONS = ("failure", "cancelled", "timed_out", "startup_failure")
 SHA = re.compile(r"[0-9a-f]{40}")
 PLACEHOLDER_SHA = "0" * 40
 GIT_PIN = re.compile(rf"chock\s*@\s*git\+https://github\.com/{OWNER}/chock(?:\.git)?@([0-9A-Za-z._/-]+)")
@@ -202,15 +214,85 @@ class Manifest:
 @dataclass
 class Result:
     errors: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
     # (repo, commit, state): state is "create" or "exists" for the v<version> tag.
     tags: list[tuple[str, str, str]] = field(default_factory=list)
 
     def refuse(self, msg: str) -> None:
         self.errors.append(msg)
 
+    def warn(self, msg: str) -> None:
+        self.warnings.append(msg)
+
     @property
     def ok(self) -> bool:
         return not self.errors
+
+
+@dataclass
+class Candidate:
+    version: str
+    rc: int
+    base: str
+    prs: dict[str, list[int]]
+
+
+def looks_like_candidate(path: Path) -> bool:
+    """True for a candidate file by name or by shape (a top-level `base`); never raises."""
+    if CANDIDATE_NAME.fullmatch(path.name):
+        return True
+    try:
+        data = load_yaml(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
+        return False
+    return isinstance(data, dict) and "base" in data
+
+
+def load_candidate(path: Path, result: Result) -> Candidate | None:
+    """Parse and validate candidates/<version>-rc.<n>.yaml. Shape errors go to result."""
+    named = CANDIDATE_NAME.fullmatch(path.name)
+    if named is None:
+        result.refuse(f"candidate: file name {path.name} must be <MAJOR.MINOR.PATCH>-rc.<n>.yaml")
+    try:
+        data = load_yaml(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
+        detail = f": {exc.problem}" if isinstance(exc, yaml.MarkedYAMLError) and exc.problem else ""
+        result.refuse(f"candidate: cannot read {path.name}: {type(exc).__name__}{detail}")
+        return None
+    if not isinstance(data, dict):
+        result.refuse("candidate: top level must be a mapping")
+        return None
+    for key in sorted(set(data) - {"version", "base", "repos"}, key=str):
+        result.refuse(f"candidate: unknown top-level key '{key}'")
+    version = data.get("version")
+    if not isinstance(version, str) or not SEMVER.fullmatch(version):
+        result.refuse(f"candidate: version must be a MAJOR.MINOR.PATCH string, got {version!r}")
+        version = ""
+    elif named is not None and named.group(1) != version:
+        result.refuse(f"candidate: file {path.name} does not match version {version!r}")
+    if data.get("base") != CANDIDATE_BASE:
+        result.refuse(f"candidate: base must be {CANDIDATE_BASE!r}, got {data.get('base')!r}")
+    raw = data.get("repos")
+    prs: dict[str, list[int]] = {}
+    if not isinstance(raw, dict):
+        result.refuse("candidate: 'repos' must be a mapping")
+        raw = {}
+    for name in TRAIN:
+        if name not in raw:
+            result.refuse(f"candidate: repos.{name} is missing (use [] for no PRs)")
+            continue
+        numbers = raw[name]
+        if not isinstance(numbers, list) or not all(type(n) is int and n > 0 for n in numbers):
+            result.refuse(f"candidate: repos.{name} must be a list of PR numbers, got {numbers!r}")
+        elif len(set(numbers)) != len(numbers):
+            result.refuse(f"candidate: repos.{name} lists a PR twice: {numbers!r}")
+        else:
+            prs[name] = numbers
+    for name in sorted(set(raw) - set(TRAIN), key=str):
+        result.refuse(f"candidate: repos.{name} is not in the train")
+    if not result.ok or named is None:
+        return None
+    return Candidate(version=version, rc=int(named.group(2)), base=CANDIDATE_BASE, prs=prs)
 
 
 def load_manifest(path: Path, result: Result) -> Manifest | None:
@@ -270,10 +352,18 @@ API_ERROR = object()
 
 
 class Checker:
-    def __init__(self, gh: GitHub, manifest: Manifest, result: Result):
+    def __init__(self, gh: GitHub, manifest: Manifest, result: Result, candidate: bool = False):
         self.gh = gh
         self.m = manifest
         self.r = result
+        self.candidate = candidate
+
+    def _refuse(self, msg: str, soft: bool = False) -> None:
+        """Refuse; in candidate mode a soft finding (the version files, until REL-5) is a warning."""
+        if soft and self.candidate:
+            self.r.warn(msg)
+        else:
+            self.r.refuse(msg)
 
     def _get(self, repo: str, path: str) -> object | None:
         """GET /repos/OWNER/<repo><path>: parsed JSON, None on 404, API_ERROR (recorded) on failure."""
@@ -300,7 +390,7 @@ class Checker:
                 return items
             page += 1
 
-    def _file(self, repo: str, path: str) -> str | None:
+    def _file(self, repo: str, path: str, soft: bool = False) -> str | None:
         """Text of <path> at the manifest commit of <repo>, or None (recorded) if absent."""
         commit = self.m.commit_of(repo)
         if commit is None:
@@ -310,46 +400,52 @@ class Checker:
         if data is API_ERROR:
             return None
         if data is None:
-            self.r.refuse(f"{repo}: {path} not found at {commit[:12]}")
+            self._refuse(f"{repo}: {path} not found at {commit[:12]}", soft)
             return None
         if not isinstance(data, dict) or data.get("encoding") != "base64":
-            self.r.refuse(f"{repo}: {path} at {commit[:12]} is not a file")
+            self._refuse(f"{repo}: {path} at {commit[:12]} is not a file", soft)
             return None
         try:
             return base64.b64decode(data.get("content", "")).decode("utf-8")
         except (ValueError, UnicodeDecodeError):
-            self.r.refuse(f"{repo}: {path} at {commit[:12]} is not UTF-8 text")
+            self._refuse(f"{repo}: {path} at {commit[:12]} is not UTF-8 text", soft)
             return None
 
-    def _ref(self, repo: str, path: str) -> str | None:
-        text = self._file(repo, path)
+    def _ref(self, repo: str, path: str, soft: bool = False) -> str | None:
+        text = self._file(repo, path, soft)
         return None if text is None else text.strip()
 
-    def _project(self, repo: str, path: str) -> dict | None:
+    def _project(self, repo: str, path: str, soft: bool = False) -> dict | None:
         """The [project] table of a pyproject.toml, or None (recorded)."""
-        text = self._file(repo, path)
+        text = self._file(repo, path, soft)
         if text is None:
             return None
         try:
             project = tomllib.loads(text)["project"]
         except (tomllib.TOMLDecodeError, KeyError, TypeError):
-            self.r.refuse(f"check 3: {repo}: {path} has no [project] table")
+            self._refuse(f"check 3: {repo}: {path} has no [project] table", soft)
             return None
         if not isinstance(project, dict):
-            self.r.refuse(f"check 3: {repo}: {path} has no [project] table")
+            self._refuse(f"check 3: {repo}: {path} has no [project] table", soft)
             return None
         return project
 
     # 1
-    def on_default_branch(self, repo: str, commit: str) -> str | None:
-        """The default branch name when <commit> is on it, else None (recorded)."""
+    def default_branch(self, repo: str) -> str | None:
+        """The repo's default branch name, or None (recorded)."""
         info = self._get(repo, "")
         if info is API_ERROR:
             return None
         if not isinstance(info, dict) or not isinstance(info.get("default_branch"), str):
             self.r.refuse(f"check 1: {repo}: repository not found")
             return None
-        branch = info["default_branch"]
+        return info["default_branch"]
+
+    def on_default_branch(self, repo: str, commit: str) -> str | None:
+        """The default branch name when <commit> is on it, else None (recorded)."""
+        branch = self.default_branch(repo)
+        if branch is None:
+            return None
         cmp = self._get(repo, f"/compare/{urllib.parse.quote(branch)}...{commit}")
         if cmp is API_ERROR:
             return None
@@ -364,65 +460,97 @@ class Checker:
         return branch
 
     # 2
-    def ci_green(self, repo: str, commit: str, branch: str) -> None:
+    def ci_problems(self, repo: str, commit: str, branch: str) -> list[tuple[str, frozenset[str] | None]]:
+        """Why CI is not green on <commit> on <branch>, as (message, red): `red` names the failed jobs
+        (or "status"), and is None for a problem that no known-red excuse can cover (never ran, queued)."""
         workflow, required = REQUIRED_WORKFLOWS[repo]
         query = urllib.parse.urlencode({"head_sha": commit, "branch": branch, "per_page": 100})
         data = self._get(repo, f"/actions/workflows/{urllib.parse.quote(workflow)}/runs?{query}")
         if data is API_ERROR:
-            return
+            return []
         if data is None:
-            self.r.refuse(f"check 2: {repo}: workflow {workflow} does not exist")
-            return
+            return [(f"check 2: {repo}: workflow {workflow} does not exist", None)]
         runs = data.get("workflow_runs") if isinstance(data, dict) else None
         if not isinstance(runs, list):
-            self.r.refuse(f"check 2: {repo}: cannot read runs of {workflow}")
-            return
+            return [(f"check 2: {repo}: cannot read runs of {workflow}", None)]
         runs = [
             r for r in runs if isinstance(r, dict) and r.get("head_sha") == commit and r.get("head_branch") == branch
         ]
         if not runs:
-            self.r.refuse(f"check 2: {repo}: {workflow} never ran on {commit[:12]} on {branch}")
-            return
+            return [(f"check 2: {repo}: {workflow} never ran on {commit[:12]} on {branch}", None)]
         # The newest run is the one that counts: a re-run after a fix supersedes the failure.
         run = max(runs, key=lambda r: (str(r.get("created_at", "")), int(r.get("run_number") or 0)))
         run_id = run.get("id")
         where = f"{workflow} run {run_id} on {commit[:12]}"
         if run.get("status") != "completed":
-            self.r.refuse(f"check 2: {repo}: {where} is {run.get('status')}")
-            return
-        if run.get("conclusion") != "success":
-            self.r.refuse(f"check 2: {repo}: {where} concluded {run.get('conclusion')}")
-        if not isinstance(run_id, int):
-            self.r.refuse(f"check 2: {repo}: {where} has no id")
-            return
-        jobs = self._pages(repo, f"/actions/runs/{run_id}/jobs", "jobs")
+            return [(f"check 2: {repo}: {where} is {run.get('status')}", None)]
+        problems: list[tuple[str, frozenset[str] | None]] = []
+        run_bad = run.get("conclusion") != "success"
+        concluded = f"check 2: {repo}: {where} concluded {run.get('conclusion')}"
+        jobs = self._pages(repo, f"/actions/runs/{run_id}/jobs", "jobs") if isinstance(run_id, int) else None
         if jobs is None:
-            return
+            if run_bad:
+                problems.append((concluded, None))
+            if not isinstance(run_id, int):
+                problems.append((f"check 2: {repo}: {where} has no id", None))
+            return problems
+        if run_bad:
+            failed = frozenset(str(j.get("name")) for j in jobs if j.get("conclusion") in RED_CONCLUSIONS)
+            problems.append((concluded, failed or None))
         for name in required:
             matching = [j for j in jobs if j.get("name") == name or str(j.get("name", "")).startswith(name + " (")]
             if not matching:
-                self.r.refuse(f"check 2: {repo}: required job '{name}' is not in {where}")
+                problems.append((f"check 2: {repo}: required job '{name}' is not in {where}", None))
             for job in matching:
                 job_name = job.get("name")
                 if job.get("status") != "completed":
-                    self.r.refuse(f"check 2: {repo}: required job '{job_name}' is {job.get('status')} in {where}")
+                    problems.append(
+                        (f"check 2: {repo}: required job '{job_name}' is {job.get('status')} in {where}", None)
+                    )
                 elif job.get("conclusion") != "success":
                     verdict = job.get("conclusion")
-                    self.r.refuse(f"check 2: {repo}: required job '{job_name}' concluded {verdict} in {where}")
+                    red = frozenset({str(job_name)}) if verdict in RED_CONCLUSIONS else None
+                    problems.append((f"check 2: {repo}: required job '{job_name}' concluded {verdict} in {where}", red))
         status = self._get(repo, f"/commits/{commit}/status")
         if isinstance(status, dict) and status.get("statuses") and status.get("state") != "success":
-            self.r.refuse(f"check 2: {repo}: commit status is {status.get('state')} on {commit[:12]}")
+            problems.append(
+                (f"check 2: {repo}: commit status is {status.get('state')} on {commit[:12]}", frozenset({"status"}))
+            )
+        return problems
+
+    def ci_green(self, repo: str, commit: str, branch: str) -> None:
+        problems = self.ci_problems(repo, commit, branch)
+        known: frozenset[str] = frozenset()
+        if self.candidate and any(red for _, red in problems):
+            known = self.red_on_default_branch(repo)
+        for msg, red in problems:
+            if red is not None and red <= known:
+                self.r.warn(f"known red: {msg} (the same job is red on the default branch)")
+            else:
+                self.r.refuse(msg)
+
+    def red_on_default_branch(self, repo: str) -> frozenset[str]:
+        """Every job (or "status") that is red on the repo's default branch head; empty if unreadable."""
+        scratch = Checker(self.gh, self.m, Result())  # its own errors are not the candidate's
+        branch = scratch.default_branch(repo)
+        if branch is None:
+            return frozenset()
+        ref = scratch._get(repo, f"/git/ref/heads/{urllib.parse.quote(branch)}")
+        head = ref.get("object", {}).get("sha") if isinstance(ref, dict) else None
+        if not isinstance(head, str):
+            return frozenset()
+        return frozenset().union(*(red for _, red in scratch.ci_problems(repo, head, branch) if red))
 
     # 3
     def engine_version(self) -> None:
-        project = self._project(ENGINE, ENGINE_VERSION_FILE)
+        project = self._project(ENGINE, ENGINE_VERSION_FILE, soft=True)
         if project is None:
             return
         got = project.get("version")
         if not isinstance(got, str):
-            self.r.refuse(f"check 3: {ENGINE}: {ENGINE_VERSION_FILE} has no [project].version")
+            self._refuse(f"check 3: {ENGINE}: {ENGINE_VERSION_FILE} has no [project].version", soft=True)
         elif got != self.m.version:
-            self.r.refuse(f"check 3: {ENGINE}: __version__ is {got!r}, manifest says {self.m.version!r}")
+            self._refuse(f"check 3: {ENGINE}: __version__ is {got!r}, manifest says {self.m.version!r}", soft=True)
         self.engine_dependencies(project)
 
     def engine_dependencies(self, project: dict) -> None:
@@ -434,34 +562,38 @@ class Checker:
         pins: list[str] = []
         for dep in deps:
             if not isinstance(dep, str):
-                self.r.refuse(f"check 3: {ENGINE}: dependency {dep!r} is not a string")
+                self._refuse(f"check 3: {ENGINE}: dependency {dep!r} is not a string", soft=True)
                 continue
             if DIRECT_REF.match(dep):
-                self.r.refuse(f"check 3: {ENGINE}: dependency {dep!r} is a direct reference, which PyPI rejects")
+                self._refuse(
+                    f"check 3: {ENGINE}: dependency {dep!r} is a direct reference, which PyPI rejects", soft=True
+                )
                 continue
             if canonical_name(dep) != AGENTSEAM:
                 continue
             m = AGENTSEAM_PIN.match(dep)
             if m is None:
-                self.r.refuse(f"check 3: {ENGINE}: dependency {dep!r} does not pin agentseam==<version>")
+                self._refuse(f"check 3: {ENGINE}: dependency {dep!r} does not pin agentseam==<version>", soft=True)
             else:
                 pins.append(m.group(1))
         if not pins:
-            self.r.refuse(f"check 3: {ENGINE}: {ENGINE_VERSION_FILE} pins no agentseam==<version>")
+            self._refuse(f"check 3: {ENGINE}: {ENGINE_VERSION_FILE} pins no agentseam==<version>", soft=True)
             return
         if len(set(pins)) > 1:
-            self.r.refuse(f"check 3: {ENGINE}: {ENGINE_VERSION_FILE} pins agentseam to {sorted(set(pins))}")
+            self._refuse(f"check 3: {ENGINE}: {ENGINE_VERSION_FILE} pins agentseam to {sorted(set(pins))}", soft=True)
             return
         pin = pins[0]
         if AGENTSEAM not in self.m.inputs:
             return  # check 1 already refused the missing input
-        upstream = self._project(AGENTSEAM, AGENTSEAM_VERSION_FILE)
+        upstream = self._project(AGENTSEAM, AGENTSEAM_VERSION_FILE, soft=True)
         if upstream is None:
             return
         got = upstream.get("version")
         if got != pin:
             commit = self.m.inputs[AGENTSEAM][:12]
-            self.r.refuse(f"check 3: {AGENTSEAM}: version is {got!r} at {commit}, {ENGINE} pins agentseam=={pin}")
+            self._refuse(
+                f"check 3: {AGENTSEAM}: version is {got!r} at {commit}, {ENGINE} pins agentseam=={pin}", soft=True
+            )
 
     # 4
     def catalog(self) -> None:
@@ -469,10 +601,11 @@ class Checker:
         ref = self._ref(CATALOG, FRAMEWORK_REF_FILE)
         if ref is not None and ref != engine:
             self.r.refuse(f"check 4: {CATALOG}: {FRAMEWORK_REF_FILE} is {ref!r}, engine commit is {engine!r}")
-        version = self._ref(CATALOG, CATALOG_VERSION_FILE)
+        version = self._ref(CATALOG, CATALOG_VERSION_FILE, soft=True)
         if version is not None and version != self.m.version:
-            self.r.refuse(
-                f"check 4: {CATALOG}: {CATALOG_VERSION_FILE} is {version!r}, manifest says {self.m.version!r}"
+            self._refuse(
+                f"check 4: {CATALOG}: {CATALOG_VERSION_FILE} is {version!r}, manifest says {self.m.version!r}",
+                soft=True,
             )
 
     # 5
@@ -505,16 +638,16 @@ class Checker:
             (SITE_VERSION_FILE, "version", self.m.version, "version"),
             (SITE_AGENTSEAM_FILE, "agentseam_ref", self.m.inputs.get(AGENTSEAM), f"manifest {AGENTSEAM}"),
         ):
-            text = self._file(SITE, path)
+            text = self._file(SITE, path, soft=True)
             if text is None:
                 continue
             try:
                 got = json.loads(text)[key]
             except (json.JSONDecodeError, KeyError, TypeError):
-                self.r.refuse(f"check 6: {SITE}: {path} has no {key}")
+                self._refuse(f"check 6: {SITE}: {path} has no {key}", soft=True)
                 continue
             if got != want:
-                self.r.refuse(f"check 6: {SITE}: {path} {key} is {got!r}, {label} is {want!r}")
+                self._refuse(f"check 6: {SITE}: {path} {key} is {got!r}, {label} is {want!r}", soft=True)
 
     # 7
     def pins(self, repo: str) -> None:
@@ -571,9 +704,23 @@ class Checker:
         else:
             self.r.refuse(f"check 9: {repo}: tag {name} already exists at {target!r}, manifest commit is {commit!r}")
 
+    # 1, candidate mode: the commit is the head of `rc` by construction; main moving under it is a warning.
+    def main_moved(self, repo: str, commit: str) -> None:
+        branch = self.default_branch(repo)
+        if branch is None:
+            return
+        cmp = self._get(repo, f"/compare/{urllib.parse.quote(branch)}...{commit}")
+        status = cmp.get("status") if isinstance(cmp, dict) else None
+        if cmp is not API_ERROR and status not in ("ahead", "identical"):
+            self.r.warn(f"check 1: {repo}: {branch} has moved under {CANDIDATE_BRANCH} (compare: {status})")
+
     def run(self) -> None:
         for repo, commit in {**self.m.repos, **self.m.inputs}.items():
-            branch = self.on_default_branch(repo, commit)
+            if self.candidate and repo in self.m.repos:
+                self.main_moved(repo, commit)
+                branch: str | None = CANDIDATE_BRANCH
+            else:
+                branch = self.on_default_branch(repo, commit)
             if branch is not None:
                 self.ci_green(repo, commit, branch)
         if not self.m.version:
@@ -590,13 +737,55 @@ class Checker:
         for repo in PINNERS:
             if repo in self.m.repos:
                 self.pins(repo)
+        if self.candidate:
+            return  # checks 8 and 9: nothing is tagged, so there is no tag to read
         for repo, commit in self.m.repos.items():
             self.tag(repo, commit)
+
+
+def ref_head(gh: GitHub, repo: str, branch: str, result: Result) -> str | None:
+    """The commit a branch points at, or None (recorded)."""
+    try:
+        ref = gh.get(f"/repos/{OWNER}/{repo}/git/ref/heads/{urllib.parse.quote(branch)}")
+    except GitHubError as exc:
+        result.refuse(f"{repo}: GitHub API error: {exc}")
+        return None
+    sha = ref.get("object", {}).get("sha") if isinstance(ref, dict) else None
+    if not isinstance(sha, str) or not SHA.fullmatch(sha):
+        result.refuse(f"check 1: {repo}: no {branch} branch")
+        return None
+    return sha
+
+
+def check_candidate(path: Path, gh: GitHub) -> tuple[Candidate | None, Manifest | None, Result]:
+    """The release check against each repo's `rc` head. Reads only; nothing is tagged or moved."""
+    result = Result()
+    candidate = load_candidate(path, result)
+    if candidate is None:
+        return None, None, result
+    repos: dict[str, str] = {}
+    for repo in TRAIN:
+        head = ref_head(gh, repo, CANDIDATE_BRANCH, result)
+        if head is not None:
+            repos[repo] = head
+    inputs: dict[str, str] = {}
+    for name in INPUTS:  # not a candidate repo: its default branch head stands in for the recorded commit
+        scratch = Checker(gh, Manifest(candidate.version, {}, {}), result)
+        branch = scratch.default_branch(name)
+        head = ref_head(gh, name, branch, result) if branch else None
+        if head is not None:
+            inputs[name] = head
+    manifest = Manifest(version=candidate.version, repos=repos, inputs=inputs)
+    Checker(gh, manifest, result, candidate=True).run()
+    return candidate, manifest, result
 
 
 def check(manifest_path: Path, gh: GitHub, expect_version: str | None = None) -> tuple[Manifest | None, Result]:
     """Run every check. Every release step runs this again before it writes anything."""
     result = Result()
+    if looks_like_candidate(manifest_path):
+        result.refuse(f"manifest: {manifest_path.name} is a release candidate, not a manifest (check.py --candidate)")
+        return None, result
     if expect_version is not None and not SEMVER.fullmatch(expect_version):
         result.refuse(f"input: version must be MAJOR.MINOR.PATCH, got {expect_version!r}")
         return None, result
@@ -630,21 +819,49 @@ def render_plan(manifest: Manifest, result: Result) -> str:
     return "\n".join(lines)
 
 
+def render_candidate_plan(candidate: Candidate, manifest: Manifest) -> str:
+    lines = [f"Candidate plan for v{candidate.version}-rc.{candidate.rc} (prints this and changes nothing):"]
+    for repo in TRAIN:
+        prs = ", ".join(f"#{n}" for n in candidate.prs[repo]) or "no PRs"
+        lines.append(f"  {OWNER}/{repo}  {CANDIDATE_BRANCH} -> {manifest.repos.get(repo, 'unresolved')}  ({prs})")
+    for name, commit in manifest.inputs.items():
+        lines.append(f"  Recorded input (default branch head, not tagged): {name} @ {commit}")
+    lines.append(f"  {NOTHING_MOVED}")
+    return "\n".join(lines)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("manifest", type=Path, help="releases/<version>.yaml")
+    parser.add_argument("manifest", type=Path, nargs="?", help="releases/<version>.yaml")
+    parser.add_argument("--candidate", type=Path, help="check candidates/<version>-rc.<n>.yaml against the rc heads")
     parser.add_argument("--version", dest="expect_version", help="refuse unless the manifest is for this version")
     parser.add_argument("--plan", action="store_true", help="print the release plan when the check passes")
     args = parser.parse_args(argv)
+    if (args.manifest is None) == (args.candidate is None):
+        parser.error("give a manifest, or --candidate <file>, not both")
+    if args.candidate is not None and args.expect_version is not None:
+        parser.error("--version is for a manifest; a candidate carries its own version")
 
     gh = GitHub(token=os.environ.get("GITHUB_TOKEN") or None)
-    manifest, result = check(args.manifest, gh, args.expect_version)
+    path = args.candidate or args.manifest
+    candidate = None
+    if args.candidate is not None:
+        candidate, manifest, result = check_candidate(path, gh)
+    else:
+        manifest, result = check(path, gh, args.expect_version)
+    for warning in result.warnings:
+        print(f"WARNING: {warning}")
     if not result.ok:
-        print(f"REFUSED: {len(result.errors)} mismatch(es) in {args.manifest.name}:", file=sys.stderr)
+        print(f"REFUSED: {len(result.errors)} mismatch(es) in {path.name}:", file=sys.stderr)
         for err in result.errors:
             print(f"  - {err}", file=sys.stderr)
         return 1
-    print(f"OK: {args.manifest.name} is consistent ({len(result.tags)} repos).")
+    if candidate is not None and manifest is not None:
+        print(f"OK: {path.name} is consistent ({len(manifest.repos)} repos, {len(result.warnings)} warning(s)).")
+        if args.plan:
+            print(render_candidate_plan(candidate, manifest))
+        return 0
+    print(f"OK: {path.name} is consistent ({len(result.tags)} repos).")
     if args.plan and manifest is not None:
         print(render_plan(manifest, result))
     return 0
