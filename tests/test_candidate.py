@@ -345,3 +345,27 @@ def test_check_py_given_a_candidate_as_a_manifest_refuses(candidate_file, cworld
     _, result = check.check(candidate_file(), cworld, VERSION)
     assert errors(result, "is a release candidate, not a manifest")
     assert cworld.calls == []
+
+
+def test_rc_equal_to_main_reads_the_runs_on_the_default_branch(cworld, candidate_file):
+    cworld.main_heads["chock-quickstart"] = cworld.commits["chock-quickstart"]  # no candidate PRs: rc is main
+    cworld.workflows["chock-quickstart"].clear()
+    cworld.green("chock-quickstart")  # CI ran on main, never on rc
+    cworld.workflows["chock-quickstart"]["ci.yml"][-1]["head_branch"] = "main"
+    _, result = run_candidate(cworld, candidate_file())
+    assert result.ok, result.errors
+    assert warnings(result, "chock-quickstart: rc equals main")
+
+
+def test_rc_equal_to_main_with_red_main_ci_is_refused_not_excused(cworld, candidate_file):
+    cworld.main_heads["chock-quickstart"] = cworld.commits["chock-quickstart"]
+    cworld.workflows["chock-quickstart"].clear()
+    cworld.green("chock-quickstart", conclusion="failure")
+    cworld.workflows["chock-quickstart"]["ci.yml"][-1]["head_branch"] = "main"
+    _, result = run_candidate(cworld, candidate_file())
+    assert errors(result, "check 2: chock-quickstart:") and not warnings(result, "known red")
+    cworld.workflows["chock-quickstart"][
+        "ci.yml"
+    ].clear()  # and no run on main at all: the hint to open an rc PR is not offered
+    _, result = run_candidate(cworld, candidate_file())
+    assert errors(result, "never ran") and not errors(result, "rc.py prs")

@@ -91,6 +91,8 @@ class LocalGH(check.GitHub):
         self.bases: dict[tuple[str, int], str] = {}
         self.rc_prs: dict[str, dict] = {}  # repo -> the open rc -> main PR
         self.sent: list[tuple[str, str, dict]] = []  # every write: (method, path, body)
+        self.check_runs: dict[str, list[str | None]] = {}  # repo -> conclusions of the rc head's check runs
+        self.api_calls: list[str] = []
 
     def send(self, method: str, path: str, body: dict) -> object | None:
         self.sent.append((method, path, body))
@@ -112,6 +114,10 @@ class LocalGH(check.GitHub):
     def get(self, path: str) -> object | None:
         prefix = f"/repos/{check.OWNER}/"
         repo, _, rest = path[len(prefix) :].partition("/")
+        self.api_calls.append(path)
+        if rest.startswith("commits/") and "/check-runs" in rest:
+            runs = self.check_runs.get(repo, [])
+            return {"total_count": len(runs), "check_runs": [{"conclusion": c} for c in runs]}
         if rest.startswith("pulls?"):
             assert "head=open-coder-ai%3Arc" in rest and "base=main" in rest and "state=open" in rest
             return [self.rc_prs[repo]] if repo in self.rc_prs else []
@@ -471,7 +477,7 @@ def test_prs_creates_a_draft_pr_from_rc_to_main_for_each_repo_with_an_rc(remote,
     make(remote, gh, cand)[0].assemble(reset=False)
     r, lines = make(remote, gh, cand)
     assert r.prs() == 0, lines.err
-    assert {repo for repo in gh.rc_prs} == set(check.TRAIN)
+    assert set(gh.rc_prs) == {"chock"}  # the other repos' rc equals main: no PR needed
     for method, path, body in gh.sent:
         assert method == "POST" and path.endswith("/pulls")
         assert body["draft"] is True and body["head"] == "rc" and body["base"] == "main" and body["title"] == TITLE
@@ -580,3 +586,45 @@ def test_prs_only_and_usage(capsys):
     with pytest.raises(SystemExit) as exc:
         rc.main(["prs", cand, "--only", "nope"])
     assert exc.value.code == 2
+
+
+def test_prs_skips_a_repo_whose_rc_equals_main_before_asking_for_its_pr(remote, gh):
+    remote.pr("chock", 1, {"one.txt": "1\n"})
+    make(remote, gh, candidate(chock=[1]))[0].assemble(reset=False)
+    assert remote.head("chock-site", "rc") == remote.head("chock-site", "main")  # no candidate PRs: rc is main
+    r, lines = make(remote, gh, candidate(chock=[1]))
+    assert r.prs() == 0, lines.err
+    assert "chock-site: rc equals main, no PR needed" in lines.out
+    assert "chock-site" not in gh.rc_prs and "chock" in gh.rc_prs
+    assert not [p for p in gh.api_calls if "/chock-site/pulls" in p]  # the 422 call was never made
+
+
+def test_pins_prints_the_regeneration_reminder_after_its_commit_only(remote, gh):
+    make(remote, gh, candidate())[0].assemble(reset=False)
+    r, lines = make(remote, gh, candidate())
+    assert r.pins() == 0, lines.err
+    text = lines.out[-1]
+    assert lines.out[-2].startswith("chock-site: rc ")
+    for needle in (
+        "python -m sitegen.docsource --chock <checkout>",
+        "python -m sitegen.writedoc --record",
+        "catalogdoc",
+        "rc only",
+    ):
+        assert needle in text
+    r, lines = make(remote, gh, candidate())
+    r.pins()  # nothing to do the second time: no reminder
+    assert not any("reminder" in line for line in lines.out)
+
+
+def test_status_shows_the_ci_summary_of_the_rc_pr_with_one_call_per_repo(remote, gh):
+    remote.commit("chock", "rc", {"x.txt": "x\n"}, parent="main")
+    remote.commit("chock-site", "rc", {"y.txt": "y\n"}, parent="main")
+    gh.rc_prs["chock"] = {"number": 5, "title": TITLE, "draft": True, "body": ""}
+    gh.check_runs["chock"] = ["success", "success", "failure", None]
+    r, lines = make(remote, gh, candidate())
+    assert r.status() == 0, lines.err
+    rows = {line.split()[0]: line for line in lines.out}
+    assert rows["chock"].endswith("ci: 2 success, 1 failure, 1 other")
+    assert "ci:" not in rows["chock-site"]  # no rc PR: no summary
+    assert len([p for p in gh.api_calls if "/chock/commits/" in p]) == 1

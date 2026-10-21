@@ -141,7 +141,13 @@ A round:
    authored as the owner with a sign-off.
 3. `python rc.py pins candidates/X.Y.Z-rc.N.yaml` adds one commit on chock-site's `rc`
    setting `.catalog-ref` and `.framework-ref` to the catalog's and the engine's `rc`
-   heads, so the site build of `rc` is the candidate.
+   heads, so the site build of `rc` is the candidate. Moving the two pins is not enough: the
+   site records engine and catalog snapshots (`data/docs-source/source.json`,
+   `data/write-source/*.json`, the catalog pages snapshot) that its CI checks against the
+   pins. After every pins move, run the site's regeneration on `rc`:
+   `python -m sitegen.docsource --chock <checkout>`, `python -m sitegen.writedoc --record`
+   and the catalogdoc snapshot. The regeneration commit goes on `rc` only, never on `main`.
+   `pins` prints this reminder after its commit; it does not run the regeneration.
 4. `python rc.py prs candidates/X.Y.Z-rc.N.yaml` opens, for each repo whose `rc` exists, a
    draft pull request from `rc` to `main` titled `Release candidate X.Y.Z-rc.N: do not merge`,
    so that each repo's CI (which triggers on pull requests and pushes to main, not on a push
@@ -151,11 +157,15 @@ A round:
    `rc` is skipped with one line. `--dry-run` reads and prints what it would do. Never merge,
    mark ready or close an rc PR: promotion merges the listed PRs to `main`, and the owner
    closes the rc PRs when deleting the `rc` branches. Run `prs` after `pins`, and again
-   after a later round to refresh the bodies.
+   after a later round to refresh the bodies. A repo whose `rc` equals `main` (no candidate
+   PRs, such as chock-quickstart and chock-example) is skipped with one line, "rc equals
+   main, no PR needed"; the candidate check then reads that repo's CI from the runs on `main`
+   for the same commit.
 5. `python rc.py status candidates/X.Y.Z-rc.N.yaml` (also `assemble`, `prs`) takes `--only <repo>`,
    repeatable, to cover part of the train, for a session whose GitHub scope reaches one
    repo; a repo not in the candidate file is a usage error. `status` prints each repo's `rc` head, which
-   listed PRs it contains, the number of its rc PR (or `none`), and whether `main` has moved under it.
+   listed PRs it contains, the number of its rc PR (or `none`) with, when the PR exists, one line of its CI from the
+   rc head's check runs (`ci: N success, M failure`), and whether `main` has moved under it.
 6. `python check.py --candidate candidates/X.Y.Z-rc.N.yaml --plan` is the release check
    against the `rc` heads, by the same code paths. Checks 1 (on `rc`, not the default
    branch), 2 and 6a refuse. Checks 3, 4b and 6b, the version files, warn until

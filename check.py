@@ -545,7 +545,7 @@ class Checker:
     def ci_green(self, repo: str, commit: str, branch: str) -> None:
         problems = self.ci_problems(repo, commit, branch)
         known: frozenset[str] = frozenset()
-        if self.candidate and any(red for _, red in problems):
+        if self.candidate and branch == CANDIDATE_BRANCH and any(red for _, red in problems):
             known = self.red_on_default_branch(repo)
         for msg, red in problems:
             if red is not None and red <= known:
@@ -564,6 +564,16 @@ class Checker:
         if not isinstance(head, str):
             return frozenset()
         return frozenset().union(*(red for _, red in scratch.ci_problems(repo, head, branch) if red))
+
+    def rc_equals_default(self, repo: str, commit: str) -> str | None:
+        """The default branch name when <commit> is that branch's head too (a repo with no candidate PRs), else None."""
+        scratch = Checker(self.gh, self.m, Result())  # its own errors are not the candidate's
+        branch = scratch.default_branch(repo)
+        if branch is None:
+            return None
+        ref = scratch._get(repo, f"/git/ref/heads/{urllib.parse.quote(branch)}")
+        head = ref.get("object", {}).get("sha") if isinstance(ref, dict) else None
+        return branch if head == commit else None
 
     # 3
     def engine_version(self) -> None:
@@ -744,6 +754,12 @@ class Checker:
             if self.candidate and repo in self.m.repos:
                 self.main_moved(repo, commit)
                 branch: str | None = CANDIDATE_BRANCH
+                same = self.rc_equals_default(repo, commit)
+                if same is not None:  # no candidate PR: no rc PR can run CI, so read the runs on the default branch
+                    branch = same
+                    self.r.warn(
+                        f"check 2: {repo}: {CANDIDATE_BRANCH} equals {same} at {commit[:12]}, CI read on {same}"
+                    )
             else:
                 branch = self.on_default_branch(repo, commit)
             if branch is not None:

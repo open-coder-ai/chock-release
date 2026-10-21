@@ -48,6 +48,15 @@ BRANCH = check.CANDIDATE_BRANCH
 IDENTITY = ("Jothi Mani Rajendran", "250249270+jothimani-rajendran@users.noreply.github.com")
 
 
+REGENERATE = (
+    "reminder: the site records engine and catalog snapshots that its CI checks against these pins. "
+    "On chock-site's rc, regenerate them: `python -m sitegen.docsource --chock <checkout>` "
+    "(data/docs-source/source.json), `python -m sitegen.writedoc --record` (data/write-source/*.json) and the "
+    "catalogdoc snapshot (the catalog pages snapshot; use the command chock-site documents for it). "
+    "The regeneration commit goes on rc only, never on main."
+)
+
+
 class Refused(Exception):
     """A step that must stop this repo; the message says why."""
 
@@ -126,6 +135,11 @@ class Rc:
 
     def rc_head(self, repo: str) -> str | None:
         ref = self.get(repo, f"/git/ref/heads/{BRANCH}")
+        sha = ref.get("object", {}).get("sha") if isinstance(ref, dict) else None
+        return sha if isinstance(sha, str) else None
+
+    def base_head(self, repo: str) -> str | None:
+        ref = self.get(repo, f"/git/ref/heads/{self.cand.base}")
         sha = ref.get("object", {}).get("sha") if isinstance(ref, dict) else None
         return sha if isinstance(sha, str) else None
 
@@ -263,6 +277,7 @@ class Rc:
                     )
                 head = git.run(["rev-parse", "HEAD"], dest).stdout.strip()
                 self.out(f"{site}: {BRANCH} {heads[site][:12]} -> {head[:12]} ({message})")
+                self.out(REGENERATE)
             return 0
         except Refused as exc:
             self.out(f"REFUSED: {exc} (nothing pushed)", file=sys.stderr)
@@ -325,6 +340,9 @@ class Rc:
         if self.rc_head(repo) is None:
             self.out(f"{repo}: no {BRANCH} branch, skipped")
             return
+        if self.rc_head(repo) == self.base_head(repo):
+            self.out(f"{repo}: {BRANCH} equals {self.cand.base}, no PR needed")
+            return
         body = self.pr_body(repo)
         existing = self.rc_pr(repo)
         if existing is None:
@@ -374,14 +392,29 @@ class Rc:
                     prs.append(f"#{n} {'in' if self.contains(repo, head, n) else 'NOT in'}")
                 pr = self.rc_pr(repo)
                 shown = f"#{pr.get('number')}" if pr else "none"
+                ci = f"  {self.ci_summary(repo, head)}" if pr else ""
                 self.out(
                     f"{repo:22} {BRANCH} {head[:12]}  rc PR: {shown}  {base} moved: {main}  "
-                    f"PRs: {', '.join(prs) or 'none'}"
+                    f"PRs: {', '.join(prs) or 'none'}{ci}"
                 )
             except Refused as exc:
                 failed += 1
                 self.out(f"{repo:22} {exc}", file=sys.stderr)
         return 1 if failed else 0
+
+    def ci_summary(self, repo: str, head: str) -> str:
+        """The line "ci: N success, M failure" from the check runs of the rc head: one API call."""
+        try:
+            data = self.get(repo, f"/commits/{head}/check-runs?per_page=100")
+        except Refused:
+            return "ci: unreadable"
+        runs = data.get("check_runs") if isinstance(data, dict) else None
+        if not isinstance(runs, list):
+            return "ci: unreadable"
+        done = [r.get("conclusion") for r in runs if isinstance(r, dict)]
+        text = f"ci: {done.count('success')} success, {sum(c in ('failure', 'timed_out') for c in done)} failure"
+        other = len(done) - done.count("success") - sum(c in ("failure", "timed_out") for c in done)
+        return text + (f", {other} other" if other else "")
 
     def listed(self, repo: str) -> str:
         return ", ".join(f"#{n}" for n in self.cand.prs[repo]) or "none"
