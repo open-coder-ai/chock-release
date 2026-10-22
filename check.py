@@ -27,6 +27,9 @@ refuse; 3, 4a, 4b, 5, 6b and 7 warn: the version files until REL-5 lands, and th
 plugins' and the quickstart and example engine pins because the owner's adopt-framework run,
 REL-4's regeneration and REL-5 set them at release prep, never rc.py.
 8 and 9 are skipped, because nothing is tagged, published or moved.
+The catalog is merge-first (the engine refuses a catalog commit that is not on the catalog's main): in candidate
+mode its "rc" is its base-branch head, every PR the candidate lists for it must be merged (refused with the PR
+number otherwise), and the site's .catalog-ref must equal that head.
 A required job that is also red on the repo's default branch is a warning ("known red"), not a refusal.
 A GitHub API error reading an input repo (agentseam: recorded, never tagged) is a warning here, a
 refusal in manifest mode, so a session whose scope lacks that repo can still read the candidate's verdict.
@@ -68,6 +71,10 @@ PLUGINS = (
 )
 PINNERS = ("chock-quickstart", "chock-example")
 TRAIN = (ENGINE, CATALOG, *PLUGINS, SITE, *PINNERS)
+# Repos with no `rc` branch: their candidate PRs are merged to the base branch first and the candidate pins the
+# base head. The engine refuses a catalog commit that is not on the catalog's main ("commit <sha> is not on
+# <url>'s main branch. Nothing was installed."), so a pin on a catalog `rc` head could never be installed.
+MERGE_FIRST = (CATALOG,)
 
 # Recorded by commit, never tagged: separate products with their own versions.
 AGENTSEAM = "agentseam"
@@ -398,11 +405,19 @@ API_ERROR = object()
 
 
 class Checker:
-    def __init__(self, gh: GitHub, manifest: Manifest, result: Result, candidate: bool = False):
+    def __init__(
+        self,
+        gh: GitHub,
+        manifest: Manifest,
+        result: Result,
+        candidate: bool = False,
+        merge_first: dict[str, list[int]] | None = None,
+    ):
         self.gh = gh
         self.m = manifest
         self.r = result
         self.candidate = candidate
+        self.merge_first = merge_first or {}  # repo -> PR numbers that must already be merged (candidate mode)
 
     def _refuse(self, msg: str, soft: bool = False) -> None:
         """Refuse; in candidate mode a soft finding (the version files and release-prep pins) is a warning."""
@@ -777,9 +792,26 @@ class Checker:
         if cmp is not API_ERROR and status not in ("ahead", "identical"):
             self.r.warn(f"check 1: {repo}: {branch} has moved under {CANDIDATE_BRANCH} (compare: {status})")
 
+    def merged(self, repo: str, numbers: list[int]) -> None:
+        """Check 1, merge-first repo: each listed PR is merged into the base branch the commit was read from."""
+        base = self.default_branch(repo)
+        for n in numbers:
+            pr = self._get(repo, f"/pulls/{n}")
+            if pr is API_ERROR:
+                continue
+            if not isinstance(pr, dict):
+                self.r.refuse(f"check 1: {repo}: PR #{n} not found")
+            elif not pr.get("merged"):
+                self.r.refuse(f"check 1: {repo}: PR #{n} is not merged ({pr.get('state')}); {repo} is merge-first")
+            elif base is not None and pr.get("base", {}).get("ref") != base:
+                self.r.refuse(f"check 1: {repo}: PR #{n} was merged into {pr.get('base', {}).get('ref')!r}, not {base}")
+
     def run(self) -> None:
         for repo, commit in {**self.m.repos, **self.m.inputs}.items():
-            if self.candidate and repo in self.m.repos:
+            if self.candidate and repo in self.merge_first:
+                branch = self.on_default_branch(repo, commit)  # its candidate head is its base head: no rc to read
+                self.merged(repo, self.merge_first[repo])
+            elif self.candidate and repo in self.m.repos:
                 self.main_moved(repo, commit)
                 branch: str | None = CANDIDATE_BRANCH
                 same = self.rc_equals_default(repo, commit)
@@ -834,7 +866,7 @@ def check_candidate(path: Path, gh: GitHub) -> tuple[Candidate | None, Manifest 
         return None, None, result
     repos: dict[str, str] = {}
     for repo in TRAIN:
-        head = ref_head(gh, repo, CANDIDATE_BRANCH, result)
+        head = ref_head(gh, repo, candidate.base if repo in MERGE_FIRST else CANDIDATE_BRANCH, result)
         if head is not None:
             repos[repo] = head
     inputs: dict[str, str] = {}
@@ -845,7 +877,8 @@ def check_candidate(path: Path, gh: GitHub) -> tuple[Candidate | None, Manifest 
         if head is not None:
             inputs[name] = head
     manifest = Manifest(version=candidate.version, repos=repos, inputs=inputs)
-    Checker(gh, manifest, result, candidate=True).run()
+    merge_first = {repo: candidate.prs[repo] for repo in MERGE_FIRST}
+    Checker(gh, manifest, result, candidate=True, merge_first=merge_first).run()
     return candidate, manifest, result
 
 
@@ -892,6 +925,10 @@ def render_candidate_plan(candidate: Candidate, manifest: Manifest) -> str:
     lines = [f"Candidate plan for v{candidate.version}-rc.{candidate.rc} (prints this and changes nothing):"]
     for repo in TRAIN:
         prs = ", ".join(f"#{n}" for n in candidate.prs[repo]) or "no PRs"
+        if repo in MERGE_FIRST:
+            head = manifest.repos.get(repo, "unresolved")
+            lines.append(f"  {OWNER}/{repo}  {candidate.base} -> {head}  (merge-first; merged: {prs})")
+            continue
         lines.append(f"  {OWNER}/{repo}  {CANDIDATE_BRANCH} -> {manifest.repos.get(repo, 'unresolved')}  ({prs})")
     for name, commit in manifest.inputs.items():
         lines.append(f"  Recorded input (default branch head, not tagged): {name} @ {commit}")

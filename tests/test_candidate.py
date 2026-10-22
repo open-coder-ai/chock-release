@@ -14,23 +14,32 @@ SHIPPED = next(iter(sorted((ROOT / "candidates").glob("*-rc.*.yaml"))))
 RC = "rc"
 
 
+CATALOG = check.CATALOG
+
+
 class CandidateWorld(World):
-    """A train whose rc heads are consistent, with its main heads separate and its CI on `rc`."""
+    """A train whose rc heads are consistent, with its main heads separate and its CI on `rc`.
+
+    The catalog is merge-first: it has no `rc`, the candidate's commit for it is its main head, its CI is read on
+    main, and its listed PRs (`pulls`, by number) are merged unless a test says otherwise.
+    """
 
     def __init__(self) -> None:
         super().__init__()
         self.main_heads = {repo: sha(f"main:{repo}") for repo in (*check.TRAIN, *check.INPUTS)}
         self.commits = {repo: sha(f"rc:{repo}") for repo in check.TRAIN} | {check.AGENTSEAM: sha("agentseam")}
         self.main_heads[check.AGENTSEAM] = self.commits[check.AGENTSEAM]
+        self.commits[CATALOG] = self.main_heads[CATALOG]
         self.no_rc: set[str] = set()
-        self.compare = {repo: "ahead" for repo in check.TRAIN}
+        self.compare = {repo: "ahead" for repo in check.TRAIN} | {CATALOG: "identical"}
+        self.pulls: dict[int, dict] = {}  # catalog PR number -> API object; a number not here is merged into main
 
     @classmethod
     def consistent(cls) -> CandidateWorld:
         return super().consistent()  # type: ignore[return-value]
 
     def add_run(self, repo, workflow, created_at="2026-01-01T00:00:00Z", **fields):
-        if repo in check.TRAIN:
+        if repo in check.TRAIN and repo != CATALOG:
             fields.setdefault("head_branch", RC)
         return super().add_run(repo, workflow, created_at, **fields)
 
@@ -50,9 +59,16 @@ class CandidateWorld(World):
         if rest.startswith("git/ref/heads/"):
             self.calls.append(path)
             branch = rest[len("git/ref/heads/") :]
+            if branch == RC and repo == CATALOG:
+                raise AssertionError("the catalog has no rc: nothing may read it")
             if branch == RC and repo in check.TRAIN:
                 return None if repo in self.no_rc else {"object": {"sha": self.commits[repo]}}
             return {"object": {"sha": self.main_heads[repo]}}
+        if rest.startswith("pulls/") and repo == CATALOG:
+            self.calls.append(path)
+            n = int(rest.split("/")[1])
+            default = {"state": "closed", "merged": True, "base": {"ref": "main"}}
+            return self.pulls.get(n, default)
         return super().get(path)
 
 
@@ -192,6 +208,86 @@ def test_the_release_check_still_refuses_the_same_version_files(cworld, tmp_path
     path.write_text(yaml.safe_dump(w.manifest()), encoding="utf-8")
     _, result = check.check(path, w, VERSION)
     assert errors(result, "check 4: chock-catalog: VERSION is '0.0.0'") and result.warnings == []
+
+
+# The catalog is merge-first ------------------------------------------------------------------
+
+
+def catalog_candidate(candidate_file, *numbers: int):
+    data = {"version": VERSION, "base": "main", "repos": {repo: [] for repo in check.TRAIN}}
+    data["repos"][CATALOG] = list(numbers)
+    return candidate_file(data)
+
+
+def test_the_catalog_is_read_on_main_never_on_rc(cworld, candidate_file):
+    manifest, result = run_candidate(cworld, catalog_candidate(candidate_file, 293))
+    assert result.ok, result.errors
+    assert manifest.repos[CATALOG] == cworld.main_heads[CATALOG]
+    assert not warnings(result, f"{CATALOG}: rc equals")  # not the "rc is main" fallback: it never had an rc
+    assert not [c for c in cworld.calls if c.endswith(f"/{CATALOG}/git/ref/heads/rc")]
+    assert f"/repos/{check.OWNER}/{CATALOG}/pulls/293" in cworld.calls
+
+
+def test_a_catalog_with_no_rc_branch_is_not_a_refusal(cworld, candidate_file):
+    cworld.no_rc.add(CATALOG)
+    _, result = run_candidate(cworld, catalog_candidate(candidate_file, 293))
+    assert result.ok, result.errors
+
+
+@pytest.mark.parametrize("state", ["open", "closed"])
+def test_a_listed_catalog_pr_that_is_not_merged_is_a_refusal_naming_the_pr(cworld, candidate_file, state):
+    cworld.pulls[293] = {"state": state, "merged": False, "base": {"ref": "main"}}
+    _, result = run_candidate(cworld, catalog_candidate(candidate_file, 293, 294))
+    assert errors(result, f"check 1: {CATALOG}: PR #293 is not merged ({state}); {CATALOG} is merge-first")
+    assert not errors(result, "#294")  # the other listed PR is merged
+
+
+def test_a_catalog_pr_merged_into_another_branch_or_missing_is_a_refusal(cworld, candidate_file):
+    cworld.pulls[293] = {"state": "closed", "merged": True, "base": {"ref": "dev"}}
+    cworld.pulls[294] = None
+    _, result = run_candidate(cworld, catalog_candidate(candidate_file, 293, 294))
+    assert errors(result, "PR #293 was merged into 'dev', not main")
+    assert errors(result, "PR #294 not found")
+
+
+def test_catalog_prs_are_only_read_for_the_catalog(cworld, candidate_file):
+    data = {"version": VERSION, "base": "main", "repos": {repo: [] for repo in check.TRAIN}}
+    data["repos"]["chock"] = [314]
+    data["repos"]["chock-site"] = [11]
+    run_candidate(cworld, candidate_file(data))
+    assert not [c for c in cworld.calls if "/pulls/" in c]  # other repos stay on the rc train, unread
+
+
+def test_the_site_catalog_pin_must_equal_the_catalog_main_head(cworld, candidate_file):
+    cworld.put("chock-site", ".catalog-ref", sha("rc:chock-catalog") + "\n")  # an rc head: not installable
+    _, result = run_candidate(cworld, catalog_candidate(candidate_file, 293))
+    assert errors(result, "check 6: chock-site: .catalog-ref")
+    cworld.put("chock-site", ".catalog-ref", cworld.main_heads[CATALOG] + "\n")
+    _, result = run_candidate(cworld, catalog_candidate(candidate_file, 293))
+    assert result.ok, result.errors
+
+
+def test_catalog_ci_must_be_green_on_main(cworld, candidate_file):
+    cworld.workflows[CATALOG]["ci.yml"].clear()
+    cworld.green(CATALOG, conclusion="failure")
+    _, result = run_candidate(cworld, catalog_candidate(candidate_file, 293))
+    assert errors(result, f"check 2: {CATALOG}:") and not warnings(result, "known red")
+    cworld.workflows[CATALOG]["ci.yml"].clear()
+    _, result = run_candidate(cworld, catalog_candidate(candidate_file, 293))
+    assert errors(result, "never ran") and not errors(result, "rc.py prs")  # no rc PR to open for it
+
+
+def test_a_catalog_head_not_on_main_is_a_refusal(cworld, candidate_file):
+    cworld.compare[CATALOG] = "ahead"
+    _, result = run_candidate(cworld, catalog_candidate(candidate_file, 293))
+    assert errors(result, f"check 1: {CATALOG}: commit {cworld.commits[CATALOG][:12]} is not on main")
+
+
+def test_the_candidate_plan_names_the_catalog_as_merge_first(cworld, candidate_file):
+    path = catalog_candidate(candidate_file, 293)
+    candidate, manifest, _ = check.check_candidate(path, cworld)
+    line = next(ln for ln in check.render_candidate_plan(candidate, manifest).splitlines() if CATALOG in ln)
+    assert f"main -> {cworld.main_heads[CATALOG]}" in line and "merge-first" in line and "rc ->" not in line
 
 
 # Known red ---------------------------------------------------------------------------------

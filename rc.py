@@ -9,19 +9,25 @@
             exception: a conflict in a PR merge confined to paths the candidate file lists under
             `regenerated:` for that repo (rewritten by pins and the site's regeneration right after)
             is resolved by taking the PR's version and noted in the merge commit and the output.
-  pins      One commit on chock-site's `rc` setting .catalog-ref and .framework-ref to the
-            catalog's and the engine's `rc` heads, pushed fast-forward only. The same commit also
+  pins      One commit on chock-site's `rc` setting .catalog-ref to the catalog's base-branch (main) head
+            and .framework-ref to the engine's `rc` head, pushed fast-forward only. The same commit also
             replaces the engine commit the site last pinned (read from data/kinds/engine-commit.txt
             and the old .framework-ref) with the new one in data/kinds/engine-commit.txt and in the
             `"chock"` entry of the `pins` object of data/architecture/*.json, by string replacement
             so the formatting survives; a diagram pinned at some other commit is left alone.
   status    Each repo's `rc` head, which listed PRs it contains, whether main moved under it, and
-            the number of its rc draft PR (or "none").
+            the number of its rc draft PR (or "none"). For the catalog: its main head and, per listed PR,
+            "merged" or "NOT merged (open|closed)".
   prs       For each repo whose `rc` exists: find the open PR from `rc` to main and create it as a
             draft when absent ("Release candidate <version>-rc.<n>: do not merge"), so CI runs on
             the `rc` head; when it exists, rewrite its body only. It never marks a PR ready, merges
             or closes one, and leaves an existing title and draft state alone. These PRs are never
             merged: promotion merges the listed PRs to main.
+
+The catalog is merge-first: the engine refuses a catalog commit that is not on the catalog's main branch, so
+the candidate pins the catalog's main head, and the PRs the candidate lists for it are merged to main (gated by
+its own CI) before `pins` runs. assemble and prs skip it (no `rc` branch, no draft PR) and --only cannot name it
+for them; status and check.py --candidate report whether its listed PRs are merged.
 
 assemble, prs and status take --only <repo> (repeatable) to cover part of the train, for a session whose
 GitHub scope reaches one repo; a repo that is not in the candidate file is a usage error.
@@ -201,6 +207,16 @@ class Rc:
         """The train repos this run covers: all of them, or those named with --only."""
         return [repo for repo in check.TRAIN if not self.only or repo in self.only]
 
+    def skip_merge_first(self, repo: str) -> bool:
+        """Say so and return True for a merge-first repo: it has no `rc` branch and no rc draft PR."""
+        if repo not in check.MERGE_FIRST:
+            return False
+        self.out(
+            f"{repo}: merge-first, skipped (its PRs are merged to {self.cand.base} first; "
+            f"no {BRANCH} branch is created, merged or pushed for it, and no draft PR)"
+        )
+        return True
+
     # GitHub reads ------------------------------------------------------------------------
 
     def get(self, repo: str, path: str) -> object | None:
@@ -243,6 +259,8 @@ class Rc:
         failed = 0
         with tempfile.TemporaryDirectory(prefix="chock-rc-") as tmp:
             for repo in self.repos():
+                if self.skip_merge_first(repo):
+                    continue
                 try:
                     self.assemble_repo(repo, Path(tmp) / repo, reset)
                 except Refused as exc:
@@ -357,14 +375,20 @@ class Rc:
         try:
             heads = {}
             for repo in (check.CATALOG, check.ENGINE, site):
-                head = self.rc_head(repo)
-                if head is None:
-                    raise Refused(f"{repo} has no {BRANCH} branch; run assemble first")
+                if repo in check.MERGE_FIRST:  # no rc: the engine installs only a catalog commit on main
+                    head = self.base_head(repo)
+                    if head is None:
+                        raise Refused(f"{repo} has no {self.cand.base} branch")
+                else:
+                    head = self.rc_head(repo)
+                    if head is None:
+                        raise Refused(f"{repo} has no {BRANCH} branch; run assemble first")
                 heads[repo] = head
             want = {".catalog-ref": heads[check.CATALOG], ".framework-ref": heads[check.ENGINE]}
             if self.dry_run:
                 for name, sha in want.items():
-                    self.out(f"{site}: would set {name} on {BRANCH} to {sha}")
+                    which = f"{self.cand.base} head" if name == ".catalog-ref" else f"{BRANCH} head"
+                    self.out(f"{site}: would set {name} on {BRANCH} to {sha} (the {which})")
                 self.out(
                     f"{site}: and the old engine commit in {ENGINE_COMMIT_FILE} and the chock pin of "
                     f"{ARCHITECTURE_DIR}/*.json, where the site still holds it"
@@ -384,9 +408,15 @@ class Rc:
                 copies = rewrite_engine_pins(dest, old_engine, heads[check.ENGINE])
                 git.run(["add", *want, *copies], dest)
                 if git.run(["diff", "--cached", "--quiet"], dest, ok=True).returncode == 0:
-                    self.out(f"{site}: {BRANCH} already pins the catalog and the engine to the rc heads; nothing to do")
+                    self.out(
+                        f"{site}: {BRANCH} already pins the catalog's {self.cand.base} head "
+                        f"and the engine's {BRANCH} head; nothing to do"
+                    )
                     return 0
-                message = f"rc: pin catalog {heads[check.CATALOG][:12]} and engine {heads[check.ENGINE][:12]}"
+                message = (
+                    f"rc: pin catalog {heads[check.CATALOG][:12]} ({self.cand.base} head) "
+                    f"and engine {heads[check.ENGINE][:12]} ({BRANCH} head)"
+                )
                 git.run(["commit", "--quiet", "--signoff", "-m", message], dest)
                 proc = git.run(["push", "--quiet", "origin", f"{BRANCH}:refs/heads/{BRANCH}"], dest, ok=True)
                 if proc.returncode != 0:
@@ -447,6 +477,8 @@ class Rc:
     def prs(self) -> int:
         failed = 0
         for repo in self.repos():
+            if self.skip_merge_first(repo):
+                continue
             try:
                 self.pr_repo(repo)
             except (Refused, check.GitHubError) as exc:
@@ -500,6 +532,9 @@ class Rc:
         base = self.cand.base
         for repo in self.repos():
             try:
+                if repo in check.MERGE_FIRST:
+                    self.status_merge_first(repo)
+                    continue
                 head = self.rc_head(repo)
                 if head is None:
                     self.out(f"{repo:22} no {BRANCH} branch  rc PR: none  (PRs: {self.listed(repo)})")
@@ -521,6 +556,20 @@ class Rc:
                 failed += 1
                 self.out(f"{repo:22} {exc}", file=sys.stderr)
         return 1 if failed else 0
+
+    def status_merge_first(self, repo: str) -> None:
+        """A merge-first repo: its base-branch head and whether each listed PR is merged (no rc, no rc PR)."""
+        head = self.base_head(repo)
+        if head is None:
+            raise Refused(f"no {self.cand.base} branch")
+        prs = []
+        for n in self.cand.prs[repo]:
+            pr = self.get(repo, f"/pulls/{n}")
+            if not isinstance(pr, dict):
+                prs.append(f"#{n} NOT merged (not found)")
+            else:
+                prs.append(f"#{n} merged" if pr.get("merged") else f"#{n} NOT merged ({pr.get('state')})")
+        self.out(f"{repo:22} {self.cand.base} {head[:12]}  merge-first  PRs: {', '.join(prs) or 'none'}")
 
     def ci_summary(self, repo: str, head: str) -> str:
         """The line "ci: N success, M failure" from the check runs of the rc head: one API call."""
@@ -584,6 +633,14 @@ def main(argv: list[str] | None = None) -> int:
     unknown = [name for name in args.only or [] if name not in cand.prs]
     if unknown:
         parser.error(f"--only names {', '.join(unknown)}, which is not in {args.candidate.name}")
+
+    merge_first = [name for name in args.only or [] if name in check.MERGE_FIRST]
+    if merge_first and args.verb in ("assemble", "prs"):
+        parser.error(
+            f"--only names {', '.join(merge_first)}, which is merge-first: its PRs are merged to {cand.base} "
+            f"(gated by its own CI) before the candidate pins it, so {args.verb} creates no {BRANCH} branch "
+            "and no draft PR for it"
+        )
 
     token = os.environ.get("GITHUB_TOKEN") or None
     rc = Rc(

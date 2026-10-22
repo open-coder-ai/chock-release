@@ -90,6 +90,7 @@ class LocalGH(check.GitHub):
         self.remote = remote
         self.states: dict[tuple[str, int], str] = {}
         self.bases: dict[tuple[str, int], str] = {}
+        self.merged: set[tuple[str, int]] = set()  # PRs GitHub reports as merged (state closed)
         self.rc_prs: dict[str, dict] = {}  # repo -> the open rc -> main PR
         self.sent: list[tuple[str, str, dict]] = []  # every write: (method, path, body)
         self.check_runs: dict[str, list[str | None]] = {}  # repo -> conclusions of the rc head's check runs
@@ -140,8 +141,10 @@ class LocalGH(check.GitHub):
             sha = self.remote.head(repo, f"refs/pull/{n}/head")
             if sha is None:
                 return None
+            merged = (repo, n) in self.merged
             return {
-                "state": self.states.get((repo, n), "open"),
+                "state": "closed" if merged else self.states.get((repo, n), "open"),
+                "merged": merged,
                 "base": {"ref": self.bases.get((repo, n), "main")},
                 "head": {"sha": sha},
             }
@@ -200,6 +203,8 @@ def make(remote, gh, cand, dry_run=False, git_cls=rc.Git) -> tuple[rc.Rc, Lines]
     lines = Lines()
     return rc.Rc(gh, git_cls(url_for=remote.url, protocols="file"), cand, dry_run, out=lines), lines
 
+
+CATALOG = check.CATALOG
 
 # assemble ---------------------------------------------------------------------------------
 
@@ -442,8 +447,9 @@ def test_pins_makes_one_signed_commit_on_site_rc_and_is_idempotent(remote, gh):
     assert r.pins() == 0, lines.err
     assert len(remote.log("chock-site")) == before + 1
     show = lambda name: git("-C", str(remote.path("chock-site")), "show", f"rc:{name}")  # noqa: E731
-    assert show(".catalog-ref") == remote.head("chock-catalog", "rc")
+    assert show(".catalog-ref") == remote.head("chock-catalog", "main")  # merge-first: main, there is no rc
     assert show(".framework-ref") == remote.head("chock", "rc")
+    assert remote.head("chock-catalog", "refs/heads/rc") is None
     body = git("-C", str(remote.path("chock-site")), "log", "-1", "--format=%an <%ae>%n%B", "rc")
     assert (
         f"Jothi Mani Rajendran <{OWNER_EMAIL}>" in body
@@ -481,7 +487,6 @@ def seed_site_with_old_engine(remote) -> None:
 def test_pins_moves_the_sites_hand_kept_engine_pins_in_the_same_commit(remote, gh):
     seed_site_with_old_engine(remote)
     remote.commit("chock", "rc", {"x.txt": "x\n"}, parent="main")
-    remote.commit("chock-catalog", "rc", {"x.txt": "x\n"}, parent="main")
     new = remote.head("chock", "rc")
     before = len(remote.log("chock-site"))
     r, lines = make(remote, gh, candidate())
@@ -504,7 +509,6 @@ def test_pins_moves_the_sites_hand_kept_engine_pins_in_the_same_commit(remote, g
 
 def test_pins_finds_the_old_engine_commit_in_engine_commit_txt_when_framework_ref_already_moved(remote, gh):
     remote.commit("chock", "rc", {"x.txt": "x\n"}, parent="main")
-    remote.commit("chock-catalog", "rc", {"x.txt": "x\n"}, parent="main")
     new = remote.head("chock", "rc")
     remote.commit(
         "chock-site",
@@ -528,6 +532,30 @@ def test_pins_refuses_when_a_repo_has_no_rc(remote, gh):
     r, lines = make(remote, gh, candidate())
     assert r.pins() == 1
     assert any("has no rc branch" in e for e in lines.err)
+
+
+def test_pins_pins_the_catalog_main_head_even_when_a_stray_catalog_rc_exists(remote, gh):
+    remote.commit("chock", "rc", {"x.txt": "x\n"}, parent="main")
+    remote.commit("chock-site", "rc", {"y.txt": "y\n"}, parent="main")
+    stray = remote.commit("chock-catalog", "rc", {"z.txt": "z\n"}, parent="main")  # never read
+    main = remote.commit("chock-catalog", "main", {"merged.txt": "m\n"})
+    r, lines = make(remote, gh, candidate(chock_catalog=[293]))
+    assert r.pins() == 0, lines.err
+    show = lambda name: git("-C", str(remote.path("chock-site")), "show", f"rc:{name}")  # noqa: E731
+    assert show(".catalog-ref") == main != stray
+    message = git("-C", str(remote.path("chock-site")), "log", "-1", "--format=%s", "rc")
+    assert message == f"rc: pin catalog {main[:12]} (main head) and engine {remote.head('chock', 'rc')[:12]} (rc head)"
+    assert not [c for c in gh.api_calls if c.endswith("/chock-catalog/git/ref/heads/rc")]
+
+
+def test_pins_dry_run_says_the_catalog_pin_is_its_main_head(remote, gh):
+    remote.commit("chock", "rc", {"x.txt": "x\n"}, parent="main")
+    remote.commit("chock-site", "rc", {"y.txt": "y\n"}, parent="main")
+    r, lines = make(remote, gh, candidate(), dry_run=True)
+    assert r.pins() == 0, lines.err
+    main = remote.head("chock-catalog", "main")
+    assert f"chock-site: would set .catalog-ref on rc to {main} (the main head)" in lines.out
+    assert any(".framework-ref on rc to" in line and "(the rc head)" in line for line in lines.out)
 
 
 # status -----------------------------------------------------------------------------------
@@ -579,6 +607,7 @@ def test_the_shipped_candidate_file_is_valid_and_matches_ir_3():
     assert cand.prs["chock-site"] == [11, 78, 80] and cand.prs["chock"] == [314, 315]
     assert set(cand.regenerated) == {"chock-site"} and ".framework-ref" in cand.regenerated["chock-site"]
     assert cand.prs["chock-quickstart"] == [] and cand.prs["chock-example"] == []
+    assert cand.prs[CATALOG] == [293]  # merged by the owner first, never assembled
     assert yaml.safe_load((SHIPPED).read_text())["base"] == "main"
 
 
@@ -673,7 +702,7 @@ def test_prs_skips_a_repo_without_rc_with_one_line(remote, gh):
     assert r.prs() == 0
     skipped = [line for line in lines.out if "skipped" in line]
     assert len(skipped) == len(check.TRAIN) - 1 and "chock: " not in " ".join(skipped)
-    assert all(line.endswith("no rc branch, skipped") for line in skipped)
+    assert all(line.endswith("no rc branch, skipped") for line in skipped if not line.startswith(CATALOG))
     assert set(gh.rc_prs) == {"chock"}
 
 
@@ -784,3 +813,90 @@ def test_status_shows_the_ci_summary_of_the_rc_pr_with_one_call_per_repo(remote,
     assert rows["chock"].endswith("ci: 2 success, 1 failure, 1 other")
     assert "ci:" not in rows["chock-site"]  # no rc PR: no summary
     assert len([p for p in gh.api_calls if "/chock/commits/" in p]) == 1
+
+
+# the catalog is merge-first ---------------------------------------------------------------
+
+
+def test_assemble_skips_the_catalog_with_one_line_and_creates_no_rc_for_it(remote, gh):
+    remote.pr("chock", 1, {"one.txt": "1\n"})
+    r, lines = make(remote, gh, candidate(chock=[1], chock_catalog=[293]))  # #293 does not even exist as a ref
+    assert r.assemble(reset=False) == 0, lines.err
+    skipped = [line for line in lines.out if line.startswith(f"{CATALOG}:")]
+    assert len(skipped) == 1 and "merge-first, skipped" in skipped[0] and "no rc branch is created" in skipped[0]
+    assert remote.head(CATALOG, "refs/heads/rc") is None and remote.head("chock", "refs/heads/rc")
+    assert not [c for c in gh.api_calls if f"/{CATALOG}/" in c]  # nothing is read for it either
+
+
+def test_assemble_dry_run_skips_the_catalog_too(remote, gh):
+    r, lines = make(remote, gh, candidate(chock_catalog=[293]), dry_run=True)
+    assert r.assemble(reset=False) == 0, lines.err
+    assert any(line.startswith(f"{CATALOG}: merge-first, skipped") for line in lines.out)
+    assert not any(line.startswith(f"{CATALOG}: would clone") for line in lines.out)
+
+
+def test_assemble_reset_leaves_the_catalog_alone(remote, gh):
+    main = remote.head(CATALOG, "refs/heads/main")
+    r, _ = make(remote, gh, candidate(chock_catalog=[293]))
+    assert r.assemble(reset=True) == 0
+    assert remote.head(CATALOG, "refs/heads/rc") is None and remote.head(CATALOG, "refs/heads/main") == main
+
+
+def test_prs_skips_the_catalog_even_when_a_stray_catalog_rc_exists(remote, gh):
+    remote.commit(CATALOG, "rc", {"x.txt": "x\n"}, parent="main")  # an old branch: still no draft PR for it
+    remote.commit("chock", "rc", {"y.txt": "y\n"}, parent="main")
+    r, lines = make(remote, gh, candidate(chock_catalog=[293]))
+    assert r.prs() == 0, lines.err
+    assert any(line.startswith(f"{CATALOG}: merge-first, skipped") and "no draft PR" in line for line in lines.out)
+    assert CATALOG not in gh.rc_prs and "chock" in gh.rc_prs
+    assert not [m for m, path, _ in gh.sent if f"/{CATALOG}/" in path]
+    assert not [c for c in gh.api_calls if f"/{CATALOG}/" in c]
+
+
+@pytest.mark.parametrize("verb", ["assemble", "prs"])
+def test_only_the_catalog_is_a_usage_error_for_assemble_and_prs(verb, capsys):
+    for only in (["chock-catalog"], ["chock", "chock-catalog"]):
+        argv = [verb, str(SHIPPED), "--dry-run"]
+        for name in only:
+            argv += ["--only", name]
+        with pytest.raises(SystemExit) as exc:
+            rc.main(argv)
+        assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "merge-first" in err and f"{verb} creates no rc branch and no draft PR for it" in err
+
+
+def test_only_the_catalog_is_fine_for_status(remote, gh):
+    lines = Lines()
+    r = rc.Rc(
+        gh,
+        rc.Git(url_for=remote.url, protocols="file"),
+        candidate(chock_catalog=[293]),
+        False,
+        out=lines,
+        only=[CATALOG],
+    )
+    assert r.status() == 0, lines.err
+    assert [line.split()[0] for line in lines.out] == [CATALOG]
+
+
+def test_status_shows_the_catalog_main_head_and_merged_or_not_per_pr(remote, gh):
+    for n in (293, 294, 295):
+        remote.pr(CATALOG, n, {f"{n}.txt": "x\n"})
+    gh.merged.add((CATALOG, 293))
+    gh.states[(CATALOG, 295)] = "closed"
+    gh.rc_prs[CATALOG] = {"number": 9, "title": TITLE, "draft": True, "body": ""}  # a stray: never shown
+    r, lines = make(remote, gh, candidate(chock_catalog=[293, 294, 295, 296]))
+    assert r.status() == 0, lines.err
+    row = next(line for line in lines.out if line.startswith(f"{CATALOG} "))
+    assert remote.head(CATALOG, "refs/heads/main")[:12] in row and "merge-first" in row
+    assert "#293 merged" in row and "#294 NOT merged (open)" in row and "#295 NOT merged (closed)" in row
+    assert "#296 NOT merged (not found)" in row
+    assert "NOT in" not in row and "rc PR" not in row and "ci:" not in row
+    assert not [c for c in gh.api_calls if f"/{CATALOG}/" in c and ("compare" in c or c.endswith("heads/rc"))]
+
+
+def test_status_with_no_catalog_prs_says_none(remote, gh):
+    r, lines = make(remote, gh, candidate())
+    assert r.status() == 0
+    assert next(line for line in lines.out if line.startswith(f"{CATALOG} ")).endswith("PRs: none")

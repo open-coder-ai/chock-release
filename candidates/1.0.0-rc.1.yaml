@@ -4,6 +4,8 @@ version: 1.0.0
 base: main
 repos:
   chock:                 [314, 315]
+  # chock-catalog is merge-first, not assembled: these PRs are merged to the catalog's main first (gated by its own
+  # CI; the owner merges), then rc.py pins pins the catalog's main head. rc.py assemble and prs skip it.
   chock-catalog:         [293]
   chock-claude-plugins:  [16]
   chock-cursor-plugins:  [15]
