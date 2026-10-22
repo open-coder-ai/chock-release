@@ -13,7 +13,9 @@ create the environment, the app or its secrets.
 |---|---|
 | `releases/X.Y.Z.yaml` | The manifest: `version`, one 40-hex `commit` per train repo, and recorded `inputs` (agentseam). |
 | `releases/*.example.yaml` | The manifest shape with placeholder commits. `check.py` refuses it. |
-| `check.py` | The consistency check (checks 1–9 below). Lists every mismatch, then exits 1. |
+| `check.py` | The consistency check (checks 1–9 below). Lists every mismatch, then exits 1. `--candidate <file>` runs it against the `rc` heads. |
+| `rc.py` | Assembles, pins, opens the rc draft PRs of, and reports on the `rc` branches of a candidate (see "Candidate"). |
+| `candidates/<version>-rc.<n>.yaml` | A candidate: the PR numbers to merge into each repo's `rc`. Not a manifest; `release.py` refuses it. |
 | `release.py` | The dry-run build (step 1) and release steps 2–6. Each step re-runs the check before it does anything. |
 | `.github/workflows/release.yml` | `workflow_dispatch` with `version` and `dry_run` (default true). |
 
@@ -95,6 +97,8 @@ check refuses; it never turns into a false "not found".
   the check refuses. Making `chock-site` public is setup checklist item 2.
 - After this repo's bootstrap PR merges, remove chock-release from the Claude app's
   repository access.
+- **A GitHub ruleset on `v*` tags in every train repo**, with no deletion and no update
+  (no move), so a tag is the frozen record. The owner creates it; nothing here does.
 
 ## Before the release: agentseam first
 
@@ -115,6 +119,89 @@ chock depends on agentseam. PyPI rejects a direct-reference dependency
 
 Then the prepare phase (plan/release-1.md): version files and pins in every train repo,
 each through a normal PR, then the manifest PR adding `releases/X.Y.Z.yaml` here.
+
+## Candidate
+
+A candidate is a release candidate the owner can test end to end before anything is
+tagged. Design: org-plan `plan/internal-release.md`. Nothing in a candidate is tagged,
+published or moved: no tag, no PyPI, no `release` branch move.
+
+A round:
+
+1. `candidates/X.Y.Z-rc.N.yaml` lists, per train repo, the PR numbers to merge into that
+   repo's `rc` branch, in order (`[]` for none), and `base: main`. A fix to a draft PR
+   or a new PR means a new round: the next file, `-rc.(N+1)`.
+2. `python rc.py assemble candidates/X.Y.Z-rc.N.yaml --dry-run` prints the plan and
+   touches nothing. Without `--dry-run`, each repo is cloned; `rc` is created from
+   `origin/main` only when it does not exist (otherwise it is checked out and
+   `origin/main` merged in); each PR is merged from `refs/pull/<n>/head` with a merge
+   commit (`--no-ff`); `rc` is pushed fast-forward only, never forced. A PR that is not
+   open, a conflict, or a push that is not a fast-forward stops that repo with the repo
+   and PR printed and nothing pushed for it; the other repos still run. Commits are
+   authored as the owner with a sign-off.
+   The candidate file may carry an optional top-level `regenerated:` mapping, repo to path globs
+   (`**` crosses directories, `*` stays in one) that the candidate rewrites on `rc` after assembly:
+   chock-site's two pins and its recorded engine, catalog and agentseam snapshots. When a PR merge
+   conflicts only in paths matching that repo's list, `assemble` takes the PR's version of each
+   (a deletion too) and completes the merge commit with the line "conflicts in regenerated paths
+   taken from PR #n: <paths>", which it also prints, because `pins` and the regeneration rewrite
+   those paths right after. It resolves nothing else: a conflict with any path outside the list, a
+   conflict merging `main` into `rc`, and a repo with no entry all refuse as before, naming the
+   paths outside the list. Rebuilding `rc` stays the owner's `--reset`.
+3. `python rc.py pins candidates/X.Y.Z-rc.N.yaml` adds one commit on chock-site's `rc`
+   setting `.catalog-ref` and `.framework-ref` to the catalog's and the engine's `rc`
+   heads, so the site build of `rc` is the candidate. Moving the two pins is not enough: the
+   site records engine and catalog snapshots (`data/docs-source/source.json`,
+   `data/write-source/*.json`, the catalog pages snapshot) that its CI checks against the
+   pins. After every pins move, run the site's regeneration on `rc`:
+   `python -m sitegen.docsource --chock <checkout>`, `python -m sitegen.writedoc --record`
+   and the catalogdoc snapshot. The regeneration commit goes on `rc` only, never on `main`.
+   `pins` prints this reminder after its commit; it does not run the regeneration.
+4. `python rc.py prs candidates/X.Y.Z-rc.N.yaml` opens, for each repo whose `rc` exists, a
+   draft pull request from `rc` to `main` titled `Release candidate X.Y.Z-rc.N: do not merge`,
+   so that each repo's CI (which triggers on pull requests and pushes to main, not on a push
+   to `rc`) runs on the `rc` head, which is what check 2 reads. The body says it is the
+   staging candidate, lists the candidate's PRs it carries and, for chock-site, the two pins.
+   When the PR exists, only its body is rewritten (title and draft state stay). A repo with no
+   `rc` is skipped with one line. `--dry-run` reads and prints what it would do. Never merge,
+   mark ready or close an rc PR: promotion merges the listed PRs to `main`, and the owner
+   closes the rc PRs when deleting the `rc` branches. Run `prs` after `pins`, and again
+   after a later round to refresh the bodies. A repo whose `rc` equals `main` (no candidate
+   PRs, such as chock-quickstart and chock-example) is skipped with one line, "rc equals
+   main, no PR needed"; the candidate check then reads that repo's CI from the runs on `main`
+   for the same commit.
+5. `python rc.py status candidates/X.Y.Z-rc.N.yaml` (also `assemble`, `prs`) takes `--only <repo>`,
+   repeatable, to cover part of the train, for a session whose GitHub scope reaches one
+   repo; a repo not in the candidate file is a usage error. `status` prints each repo's `rc` head, which
+   listed PRs it contains, the number of its rc PR (or `none`) with, when the PR exists, one line of its CI from the
+   rc head's check runs (`ci: N success, M failure`), and whether `main` has moved under it.
+6. `python check.py --candidate candidates/X.Y.Z-rc.N.yaml --plan` is the release check
+   against the `rc` heads, by the same code paths. Checks 1 (on `rc`, not the default
+   branch), 2 and 6a refuse. Checks 3, 4b and 6b, the version files, warn until
+   REL-5 lands. Checks 4a, 5 and 7 (the catalog's `.framework-ref`, the plugins'
+   `generated_from`, the quickstart and example engine pins) warn too: the owner's
+   adopt-framework run, the plugin regeneration (REL-4) and REL-5 set those pins at release
+   prep, never `rc.py`; they still refuse in manifest mode. A check 2 "never ran" on `rc` means
+   the rc draft PR is missing: run `rc.py prs`. Only the site's
+   pins (6a) are moved by `rc.py pins`, so 6a refuses. Checks 8 and 9 (tags) are skipped. A required job that is red on `rc` and
+   also red on the repo's default branch is printed as `known red` and is a warning
+   (the plugin repos' `verify`, for example). `main` having moved under `rc` is a
+   warning. The plan prints "candidate: nothing is tagged, published or moved".
+
+What agents may do: everything above except `--reset`. An agent assembles, pins, opens the rc draft PRs, reads
+status and runs the candidate check; every push to `rc` is a merge commit or a
+fast-forward. An agent never tags, publishes, moves `release`, or passes `--reset` or
+`--i-am-the-owner`.
+
+The owner's `--reset`: `python rc.py assemble candidates/X.Y.Z-rc.N.yaml --reset
+--i-am-the-owner` deletes and recreates `rc` from `main` in every repo (a force
+replacement, so it is the owner's alone, run from the laptop). `--reset` without
+`--i-am-the-owner` is refused before anything is read. The owner also deletes the `rc`
+branches after the release.
+
+`release.py`, the release workflow and `check.py` given a candidate as a manifest all
+refuse it outright. A candidate that passes becomes a release only through the manifest
+PR (`releases/X.Y.Z.yaml`) naming the commits that reached `main`.
 
 ## Dry run
 
