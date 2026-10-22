@@ -604,7 +604,7 @@ def test_the_shipped_candidate_file_is_valid_and_matches_ir_3():
     result = check.Result()
     cand = check.load_candidate(SHIPPED, result)
     assert cand is not None, result.errors
-    assert cand.prs["chock-site"] == [11, 78, 80] and cand.prs["chock"] == [314, 315]
+    assert cand.prs["chock-site"] == [78, 80] and cand.prs["chock"] == [314, 315]
     assert set(cand.regenerated) == {"chock-site"} and ".framework-ref" in cand.regenerated["chock-site"]
     assert cand.prs["chock-quickstart"] == [] and cand.prs["chock-example"] == []
     assert cand.prs[CATALOG] == [293]  # merged by the owner first, never assembled

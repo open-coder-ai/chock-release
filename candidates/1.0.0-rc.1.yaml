@@ -12,7 +12,8 @@ repos:
   chock-codex-plugins:   [15]
   chock-copilot-plugins: [14]
   chock-devin-plugins:   [9]
-  chock-site:            [11, 78, 80]
+  # chock-site#11 was merged to main (about 02:08Z); assemble refuses a listed PR that is not open, so it is no longer listed.
+  chock-site:            [78, 80]
   chock-quickstart:      []
   chock-example:         []
 # Paths the candidate rewrites on `rc` after assembly (rc.py pins, then chock-site's own regeneration:
