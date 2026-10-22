@@ -15,7 +15,7 @@ repos:
   chock-example:         []
 # Paths the candidate rewrites on `rc` after assembly (rc.py pins, then chock-site's own regeneration:
 # sitegen cliexamples --record, catalogdoc, writedoc --record, docsource, agentseamdoc snapshot and
-# run --record). A merge conflict confined to these is resolved by taking the PR's side; anything
+# run --record; pins also moves the engine commit in engine-commit.txt and the architecture diagrams). A merge conflict confined to these is resolved by taking the PR's side; anything
 # else still refuses.
 regenerated:
   chock-site:
@@ -28,3 +28,4 @@ regenerated:
     - data/agentseam-source/**
     - data/agentseam-run.json
     - data/kinds/engine-commit.txt
+    - data/architecture/*.json

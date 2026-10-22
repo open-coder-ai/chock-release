@@ -150,13 +150,20 @@ A round:
    paths outside the list. Rebuilding `rc` stays the owner's `--reset`.
 3. `python rc.py pins candidates/X.Y.Z-rc.N.yaml` adds one commit on chock-site's `rc`
    setting `.catalog-ref` and `.framework-ref` to the catalog's and the engine's `rc`
-   heads, so the site build of `rc` is the candidate. Moving the two pins is not enough: the
-   site records engine and catalog snapshots (`data/docs-source/source.json`,
-   `data/write-source/*.json`, the catalog pages snapshot) that its CI checks against the
-   pins. After every pins move, run the site's regeneration on `rc`:
-   `python -m sitegen.docsource --chock <checkout>`, `python -m sitegen.writedoc --record`
-   and the catalogdoc snapshot. The regeneration commit goes on `rc` only, never on `main`.
-   `pins` prints this reminder after its commit; it does not run the regeneration.
+   heads, so the site build of `rc` is the candidate. The same commit moves the engine commit
+   the site hand-keeps elsewhere (read from `data/kinds/engine-commit.txt` and the old
+   `.framework-ref`): the whole of `data/kinds/engine-commit.txt` and the `"chock"` entry of
+   `pins` in each `data/architecture/*.json` that held it (a diagram pinned at another commit
+   stays). Moving pins is not enough: the site records snapshots that its CI checks against
+   them. After every pins move, regenerate on `rc` (commands as chock-site documents them; chock
+   installed at `.framework-ref`):
+   `python -m sitegen.docsource --chock <chock checkout>`, `python -m sitegen.writedoc --record`,
+   `python -m sitegen.catalogdoc --catalog <catalog checkout>`, `python -m sitegen.cliexamples --record`,
+   `python -m sitegen.agentseamdoc snapshot --agentseam <agentseam checkout>`,
+   `python -m sitegen.agentseamdoc run --record`, then
+   `python -m sitegen.architecture --check --fetch --clones <folder> --repo chock-site=.`.
+   The regeneration commit goes on `rc` only, never on `main`. `pins` prints this list after
+   its commit; it does not run it.
 4. `python rc.py prs candidates/X.Y.Z-rc.N.yaml` opens, for each repo whose `rc` exists, a
    draft pull request from `rc` to `main` titled `Release candidate X.Y.Z-rc.N: do not merge`,
    so that each repo's CI (which triggers on pull requests and pushes to main, not on a push

@@ -10,7 +10,11 @@
             `regenerated:` for that repo (rewritten by pins and the site's regeneration right after)
             is resolved by taking the PR's version and noted in the merge commit and the output.
   pins      One commit on chock-site's `rc` setting .catalog-ref and .framework-ref to the
-            catalog's and the engine's `rc` heads, pushed fast-forward only.
+            catalog's and the engine's `rc` heads, pushed fast-forward only. The same commit also
+            replaces the engine commit the site last pinned (read from data/kinds/engine-commit.txt
+            and the old .framework-ref) with the new one in data/kinds/engine-commit.txt and in the
+            `"chock"` entry of the `pins` object of data/architecture/*.json, by string replacement
+            so the formatting survives; a diagram pinned at some other commit is left alone.
   status    Each repo's `rc` head, which listed PRs it contains, whether main moved under it, and
             the number of its rc draft PR (or "none").
   prs       For each repo whose `rc` exists: find the open PR from `rc` to main and create it as a
@@ -54,11 +58,60 @@ IDENTITY = ("Jothi Mani Rajendran", "250249270+jothimani-rajendran@users.noreply
 
 REGENERATE = (
     "reminder: the site records engine and catalog snapshots that its CI checks against these pins. "
-    "On chock-site's rc, regenerate them: `python -m sitegen.docsource --chock <checkout>` "
-    "(data/docs-source/source.json), `python -m sitegen.writedoc --record` (data/write-source/*.json) and the "
-    "catalogdoc snapshot (the catalog pages snapshot; use the command chock-site documents for it). "
+    "On chock-site's rc, in this order, regenerate them (commands from chock-site's module docstrings and "
+    ".github/workflows/ci.yml): "
+    "1. `python -m sitegen.docsource --chock <chock checkout at .framework-ref>` (data/docs-source/); "
+    "2. `python -m sitegen.writedoc --record` (data/write-source/, chock installed at .framework-ref); "
+    "3. `python -m sitegen.catalogdoc --catalog <catalog checkout at .catalog-ref>` "
+    "(data/catalog-source/, chock installed at .framework-ref; the adopt run fetches from GitHub); "
+    "4. `python -m sitegen.cliexamples --record` (data/cli-examples/, chock installed at .framework-ref); "
+    "5. `python -m sitegen.agentseamdoc snapshot --agentseam <agentseam checkout>` "
+    "(data/agentseam-source/) and `python -m sitegen.agentseamdoc run --record` (data/agentseam-run.json); "
+    "6. check the architecture diagrams: "
+    "`python -m sitegen.architecture --check --fetch --clones <folder> --repo chock-site=.` "
+    "(pins now follow the engine; this only reads). "
+    "Then run each of the above with --check (agentseamdoc: `snapshot ... --check` and `run --check`). "
     "The regeneration commit goes on rc only, never on main."
 )
+
+ENGINE_COMMIT_FILE = "data/kinds/engine-commit.txt"
+ARCHITECTURE_DIR = "data/architecture"
+SHA_RE = re.compile(r"[0-9a-f]{40}")
+
+
+def read_sha(path: Path) -> str | None:
+    """The 40-hex commit in a one-line pin file, or None when the file is missing or holds anything else."""
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError):
+        return None
+    return text if SHA_RE.fullmatch(text) else None
+
+
+def rewrite_engine_pins(site: Path, old_shas: set[str], new: str) -> list[str]:
+    """Replace each old engine commit by `new` where the site hand-keeps a copy of the engine pin.
+
+    Those copies are data/kinds/engine-commit.txt (the whole file) and the `"chock"` entry of the `pins`
+    object of each data/architecture/*.json. A plain textual replacement of the old sha, so key order,
+    indentation and the final newline survive. Returns the repo-relative paths changed.
+    """
+    changed = []
+    paths = [site / ENGINE_COMMIT_FILE, *sorted((site / ARCHITECTURE_DIR).glob("*.json"))]
+    for path in paths:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        after = text
+        for old in old_shas - {new}:
+            if path.suffix == ".json":
+                after = re.sub(rf'("chock"\s*:\s*"){old}(")', rf"\g<1>{new}\g<2>", after)
+            else:
+                after = after.replace(old, new)
+        if after != text:
+            path.write_text(after, encoding="utf-8")
+            changed.append(path.relative_to(site).as_posix())
+    return changed
 
 
 def glob_match(pattern: str, path: str) -> bool:
@@ -312,6 +365,10 @@ class Rc:
             if self.dry_run:
                 for name, sha in want.items():
                     self.out(f"{site}: would set {name} on {BRANCH} to {sha}")
+                self.out(
+                    f"{site}: and the old engine commit in {ENGINE_COMMIT_FILE} and the chock pin of "
+                    f"{ARCHITECTURE_DIR}/*.json, where the site still holds it"
+                )
                 self.out(f"{site}: one commit, pushed fast-forward only")
                 return 0
             with tempfile.TemporaryDirectory(prefix="chock-rc-") as tmp:
@@ -319,11 +376,15 @@ class Rc:
                 git = self.git
                 git.run(["clone", "--quiet", "--no-tags", git.url_for(site), str(dest)])
                 git.run(["checkout", "--quiet", "-B", BRANCH, f"origin/{BRANCH}"], dest)
+                old_engine = {
+                    sha for sha in (read_sha(dest / ENGINE_COMMIT_FILE), read_sha(dest / ".framework-ref")) if sha
+                }
                 for name, sha in want.items():
                     (dest / name).write_text(sha + "\n", encoding="utf-8")
-                git.run(["add", *want], dest)
+                copies = rewrite_engine_pins(dest, old_engine, heads[check.ENGINE])
+                git.run(["add", *want, *copies], dest)
                 if git.run(["diff", "--cached", "--quiet"], dest, ok=True).returncode == 0:
-                    self.out(f"{site}: {BRANCH} already pins {', '.join(want)} to the rc heads; nothing to do")
+                    self.out(f"{site}: {BRANCH} already pins the catalog and the engine to the rc heads; nothing to do")
                     return 0
                 message = f"rc: pin catalog {heads[check.CATALOG][:12]} and engine {heads[check.ENGINE][:12]}"
                 git.run(["commit", "--quiet", "--signoff", "-m", message], dest)
@@ -334,6 +395,8 @@ class Rc:
                     )
                 head = git.run(["rev-parse", "HEAD"], dest).stdout.strip()
                 self.out(f"{site}: {BRANCH} {heads[site][:12]} -> {head[:12]} ({message})")
+                if copies:
+                    self.out(f"{site}: also moved the engine commit in {', '.join(copies)}")
                 self.out(REGENERATE)
             return 0
         except Refused as exc:

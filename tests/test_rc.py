@@ -455,6 +455,75 @@ def test_pins_makes_one_signed_commit_on_site_rc_and_is_idempotent(remote, gh):
     assert any("nothing to do" in line for line in lines.out)
 
 
+OLD_ENGINE = "e5e05a0317b8589361f423605829ba368e16e5bd"
+OTHER_ENGINE = "39df00bbf7646a08481247f31d5091d09850f96f"
+
+
+def diagram(chock: str) -> str:
+    pins = f'"pins": {{\n    "chock": "{chock}",\n    "agentseam": "{OLD_ENGINE}"\n  }}'
+    return f'{{\n  "id": "d",\n  {pins},\n  "n": 1\n}}\n'
+
+
+def seed_site_with_old_engine(remote) -> None:
+    remote.commit(
+        "chock-site",
+        "rc",
+        {
+            ".framework-ref": OLD_ENGINE + "\n",
+            "data/kinds/engine-commit.txt": OLD_ENGINE + "\n",
+            "data/architecture/lifecycle.json": diagram(OLD_ENGINE),
+            "data/architecture/whole-train.json": diagram(OTHER_ENGINE),
+        },
+        parent="main",
+    )
+
+
+def test_pins_moves_the_sites_hand_kept_engine_pins_in_the_same_commit(remote, gh):
+    seed_site_with_old_engine(remote)
+    remote.commit("chock", "rc", {"x.txt": "x\n"}, parent="main")
+    remote.commit("chock-catalog", "rc", {"x.txt": "x\n"}, parent="main")
+    new = remote.head("chock", "rc")
+    before = len(remote.log("chock-site"))
+    r, lines = make(remote, gh, candidate())
+    assert r.pins() == 0, lines.err
+    assert len(remote.log("chock-site")) == before + 1
+    show = lambda name: git("-C", str(remote.path("chock-site")), "show", f"rc:{name}")  # noqa: E731
+    assert show(".framework-ref") == new
+    assert show("data/kinds/engine-commit.txt") == new
+    # only the chock pin that held the old engine commit moves; formatting and other fields stay
+    assert show("data/architecture/lifecycle.json") == diagram(new).rstrip("\n")
+    assert show("data/architecture/whole-train.json") == diagram(OTHER_ENGINE).rstrip("\n")
+    assert any(
+        "also moved the engine commit in" in line and "data/architecture/lifecycle.json" in line for line in lines.out
+    )
+    r, lines = make(remote, gh, candidate())
+    assert r.pins() == 0
+    assert len(remote.log("chock-site")) == before + 1
+    assert any("nothing to do" in line for line in lines.out)
+
+
+def test_pins_finds_the_old_engine_commit_in_engine_commit_txt_when_framework_ref_already_moved(remote, gh):
+    remote.commit("chock", "rc", {"x.txt": "x\n"}, parent="main")
+    remote.commit("chock-catalog", "rc", {"x.txt": "x\n"}, parent="main")
+    new = remote.head("chock", "rc")
+    remote.commit(
+        "chock-site",
+        "rc",
+        {".framework-ref": new + "\n", "data/kinds/engine-commit.txt": OLD_ENGINE + "\n"},
+        parent="main",
+    )
+    r, lines = make(remote, gh, candidate())
+    assert r.pins() == 0, lines.err
+    assert git("-C", str(remote.path("chock-site")), "show", "rc:data/kinds/engine-commit.txt") == new
+
+
+def test_pins_dry_run_names_the_engine_pin_copies(remote, gh):
+    make(remote, gh, candidate())[0].assemble(reset=False)
+    r, lines = make(remote, gh, candidate(), dry_run=True)
+    assert r.pins() == 0
+    assert any("data/kinds/engine-commit.txt" in line and "data/architecture/*.json" in line for line in lines.out)
+
+
 def test_pins_refuses_when_a_repo_has_no_rc(remote, gh):
     r, lines = make(remote, gh, candidate())
     assert r.pins() == 1
@@ -689,9 +758,13 @@ def test_pins_prints_the_regeneration_reminder_after_its_commit_only(remote, gh)
     text = lines.out[-1]
     assert lines.out[-2].startswith("chock-site: rc ")
     for needle in (
-        "python -m sitegen.docsource --chock <checkout>",
+        "python -m sitegen.docsource --chock <chock checkout at .framework-ref>",
         "python -m sitegen.writedoc --record",
-        "catalogdoc",
+        "python -m sitegen.catalogdoc --catalog <catalog checkout at .catalog-ref>",
+        "python -m sitegen.cliexamples --record",
+        "python -m sitegen.agentseamdoc snapshot --agentseam <agentseam checkout>",
+        "python -m sitegen.agentseamdoc run --record",
+        "python -m sitegen.architecture --check --fetch --clones <folder> --repo chock-site=.",
         "rc only",
     ):
         assert needle in text
