@@ -130,7 +130,9 @@ A round:
 
 1. `candidates/X.Y.Z-rc.N.yaml` lists, per train repo, the PR numbers to merge into that
    repo's `rc` branch, in order (`[]` for none), and `base: main`. A fix to a draft PR
-   or a new PR means a new round: the next file, `-rc.(N+1)`.
+   or a new PR means a new round: the next file, `-rc.(N+1)`. The one exception is
+   `chock-catalog`, which is merge-first (see "The catalog" below): its list names PRs that must
+   already be merged to its `main`, not PRs to assemble.
 2. `python rc.py assemble candidates/X.Y.Z-rc.N.yaml --dry-run` prints the plan and
    touches nothing. Without `--dry-run`, each repo is cloned; `rc` is created from
    `origin/main` only when it does not exist (otherwise it is checked out and
@@ -149,8 +151,8 @@ A round:
    conflict merging `main` into `rc`, and a repo with no entry all refuse as before, naming the
    paths outside the list. Rebuilding `rc` stays the owner's `--reset`.
 3. `python rc.py pins candidates/X.Y.Z-rc.N.yaml` adds one commit on chock-site's `rc`
-   setting `.catalog-ref` and `.framework-ref` to the catalog's and the engine's `rc`
-   heads, so the site build of `rc` is the candidate. The same commit moves the engine commit
+   setting `.catalog-ref` to the catalog's `main` head and `.framework-ref` to the engine's `rc`
+   head, so the site build of `rc` is the candidate. The same commit moves the engine commit
    the site hand-keeps elsewhere (read from `data/kinds/engine-commit.txt` and the old
    `.framework-ref`): the whole of `data/kinds/engine-commit.txt` and the `"chock"` entry of
    `pins` in each `data/architecture/*.json` that held it (a diagram pinned at another commit
@@ -164,14 +166,28 @@ A round:
    `python -m sitegen.architecture --check --fetch --clones <folder> --repo chock-site=.`.
    The regeneration commit goes on `rc` only, never on `main`. `pins` prints this list after
    its commit; it does not run it.
+
+   **The catalog.** `chock-catalog` is merge-first, not part of the `rc` train. Why: the engine's
+   `chock install` refuses a catalog ref that is not on the catalog's `main` ("commit <sha> is not on
+   https://github.com/open-coder-ai/chock-catalog's main branch. Nothing was installed."). That is a
+   security check and stays; there is no flag around it. A site built from a pin on a catalog `rc`
+   head could therefore never install anything. What to do: merge the PRs the candidate lists for
+   `chock-catalog` to its `main` first ("Create a merge commit"; the catalog's own CI gates them), then
+   run `pins` (it pins the catalog's `main` head), then regenerate `data/catalog-source/` on the
+   site's `rc` with the `catalogdoc` command above, against that `main` head. Nothing changes for
+   users meanwhile: an install carries the catalog ref the site pinned when the selection was built,
+   and the live site keeps its pin until promotion. `assemble` and `prs` skip the catalog with one
+   line (no `rc` branch is created, merged or pushed for it, and no draft PR), and `--only
+   chock-catalog` is a usage error for them; `status` and `check.py --candidate` read its `main`.
 4. `python rc.py prs candidates/X.Y.Z-rc.N.yaml` opens, for each repo whose `rc` exists, a
    draft pull request from `rc` to `main` titled `Release candidate X.Y.Z-rc.N: do not merge`,
    so that each repo's CI (which triggers on pull requests and pushes to main, not on a push
    to `rc`) runs on the `rc` head, which is what check 2 reads. The body says it is the
    staging candidate, lists the candidate's PRs it carries and, for chock-site, the two pins.
    When the PR exists, only its body is rewritten (title and draft state stay). A repo with no
-   `rc` is skipped with one line. `--dry-run` reads and prints what it would do. Never merge,
-   mark ready or close an rc PR: promotion merges the listed PRs to `main`, and the owner
+   `rc` is skipped with one line, and `chock-catalog` is skipped as merge-first. `--dry-run` reads and prints what it would do. Never merge,
+   mark ready or close an rc PR: promotion merges the listed PRs to `main` (the catalog's were
+   already merged before `pins`, so promotion does not touch them), and the owner
    closes the rc PRs when deleting the `rc` branches. Run `prs` after `pins`, and again
    after a later round to refresh the bodies. A repo whose `rc` equals `main` (no candidate
    PRs, such as chock-quickstart and chock-example) is skipped with one line, "rc equals
@@ -179,18 +195,23 @@ A round:
    for the same commit.
 5. `python rc.py status candidates/X.Y.Z-rc.N.yaml` (also `assemble`, `prs`) takes `--only <repo>`,
    repeatable, to cover part of the train, for a session whose GitHub scope reaches one
-   repo; a repo not in the candidate file is a usage error. `status` prints each repo's `rc` head, which
+   repo; a repo not in the candidate file is a usage error, and `chock-catalog` is a usage error for
+   `assemble` and `prs`. `status` prints each repo's `rc` head, which
    listed PRs it contains, the number of its rc PR (or `none`) with, when the PR exists, one line of its CI from the
-   rc head's check runs (`ci: N success, M failure`), and whether `main` has moved under it.
+   rc head's check runs (`ci: N success, M failure`), and whether `main` has moved under it. For
+   `chock-catalog` it prints its `main` head and, per listed PR, `merged` or `NOT merged (open|closed)`
+   (no `rc` PR column).
 6. `python check.py --candidate candidates/X.Y.Z-rc.N.yaml --plan` is the release check
-   against the `rc` heads, by the same code paths. Checks 1 (on `rc`, not the default
+   against the `rc` heads, by the same code paths; for `chock-catalog` it reads `main` instead
+   (its commit is the `main` head, its CI is read on `main`, and a listed catalog PR that is not
+   merged is a refusal naming the PR number). Checks 1 (on `rc`, not the default
    branch), 2 and 6a refuse. Checks 3, 4b and 6b, the version files, warn until
    REL-5 lands. Checks 4a, 5 and 7 (the catalog's `.framework-ref`, the plugins'
    `generated_from`, the quickstart and example engine pins) warn too: the owner's
    adopt-framework run, the plugin regeneration (REL-4) and REL-5 set those pins at release
    prep, never `rc.py`; they still refuse in manifest mode. A check 2 "never ran" on `rc` means
    the rc draft PR is missing: run `rc.py prs`. Only the site's
-   pins (6a) are moved by `rc.py pins`, so 6a refuses. Checks 8 and 9 (tags) are skipped. A required job that is red on `rc` and
+   pins (6a) are moved by `rc.py pins`, so 6a refuses (`.catalog-ref` must equal the catalog's `main` head). Checks 8 and 9 (tags) are skipped. A required job that is red on `rc` and
    also red on the repo's default branch is printed as `known red` and is a warning
    (the plugin repos' `verify`, for example). `main` having moved under `rc` is a
    warning. The plan prints "candidate: nothing is tagged, published or moved".
