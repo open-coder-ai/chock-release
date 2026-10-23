@@ -149,7 +149,7 @@ PIN_BREAKS = [
     (lambda w: w.put("chock-example", "requirements.txt", "chock==1.2.3\n"), "check 7: chock-example"),
     (lambda w: w.put("chock-catalog", ".framework-ref", sha("other") + "\n"), "check 4: chock-catalog: .framework-ref"),
     (
-        lambda w: w.put("chock-codex-plugins", "generated_from.yaml", "generated_from: {catalog: x, engine: y}"),
+        lambda w: w.put("chock-codex-plugins", "generated_from.yaml", "catalog: {sha: x}\nframework: {sha: y}\n"),
         "check 5: chock-codex-plugins",
     ),
 ]

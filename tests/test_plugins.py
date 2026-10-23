@@ -26,10 +26,6 @@ def b64(text: str) -> dict:
     return {"encoding": "base64", "content": base64.b64encode(text.encode()).decode()}
 
 
-def flat(catalog: str, engine: str) -> str:
-    return f"generated_from:\n  catalog: {catalog}\n  engine: {engine}\n"
-
-
 def nested(catalog: str, engine: str) -> str:
     return (
         f'catalog:\n  repository: open-coder-ai/chock-catalog\n  ref: "x"\n  sha: "{catalog}"\n'
@@ -51,7 +47,7 @@ class FakeGitHub(check.GitHub):
         self.verify_jobs: dict[str, list[dict]] = {}
         self.never_appears: set[tuple[str, str]] = set()
         self.main: dict[str, str] = {r: OLD for r in check.PLUGINS}
-        self.provenance: dict[str, str] = {r: flat(CATALOG, ENGINE) for r in check.PLUGINS}
+        self.provenance: dict[str, str] = {r: nested(CATALOG, ENGINE) for r in check.PLUGINS}
         self.engine_pyproject = ENGINE_PYPROJECT
         self.locks: dict[str, str | None] = {r: lock("0.4.1") for r in check.PLUGINS}
         self.dispatched: list[tuple[str, str, dict]] = []
@@ -157,7 +153,7 @@ def test_real_run_publishes_verifies_and_prints_each_head():
     assert order == [("chock-codex-plugins", "publish.yml"), ("chock-codex-plugins", "generated-only.yml")]
     for repo in check.PLUGINS:
         assert f"{repo}: main is now {sha(f'new-{repo}')}" in out
-        assert f"catalog {CATALOG}, engine {ENGINE}" in out
+        assert f"catalog {CATALOG}, framework {ENGINE}" in out
     assert out.rstrip().endswith("OK: every plugin repo is published and verified")
 
 
@@ -204,15 +200,16 @@ def test_refuses_a_short_or_named_commit(bad):
     assert gh.dispatched == []
 
 
-def test_warns_when_catalog_commit_is_not_catalog_main():
+def test_refuses_when_catalog_commit_is_not_catalog_main():
     gh = FakeGitHub()
     gh.catalog_main = sha("moved")
     code, out = run_publish(gh)
-    assert code == 0
-    assert "WARNING" in out and "regenerates from main" in out
+    assert code == 1
+    assert "is not the head of its main" in out and "merge-first" in out
+    assert gh.dispatched == []
 
 
-@pytest.mark.parametrize("text", [flat(sha("stale"), ENGINE), nested(CATALOG, sha("stale")), "nonsense: 1\n"])
+@pytest.mark.parametrize("text", [nested(sha("stale"), ENGINE), nested(CATALOG, sha("stale")), "nonsense: 1\n"])
 def test_refuses_when_provenance_names_another_commit(text):
     gh = FakeGitHub()
     gh.provenance["chock-cursor-plugins"] = text
@@ -224,10 +221,11 @@ def test_refuses_when_provenance_names_another_commit(text):
     assert "chock-devin-plugins: in sync" in out
 
 
-def test_accepts_the_layout_publish_yml_writes():
+def test_does_not_read_the_old_generated_from_layout():
     gh = FakeGitHub()
-    gh.provenance = {r: nested(CATALOG, ENGINE) for r in check.PLUGINS}
-    assert run_publish(gh)[0] == 0
+    gh.provenance["chock-cursor-plugins"] = f"generated_from:\n  catalog: {CATALOG}\n  engine: {ENGINE}\n"
+    code, out = run_publish(gh)
+    assert code == 1 and "names no catalog and engine commit" in out
 
 
 def test_failed_publish_run_skips_verify_for_that_repo():

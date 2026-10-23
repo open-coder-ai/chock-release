@@ -67,7 +67,7 @@ class World(check.GitHub):
             w.put(
                 repo,
                 "generated_from.yaml",
-                yaml.safe_dump({"generated_from": {"catalog": c[check.CATALOG], "engine": c[check.ENGINE]}}),
+                yaml.safe_dump({"catalog": {"sha": c[check.CATALOG]}, "framework": {"sha": c[check.ENGINE]}}),
             )
         w.put(check.SITE, ".framework-ref", c[check.ENGINE] + "\n")
         w.put(check.SITE, ".catalog-ref", c[check.CATALOG] + "\n")

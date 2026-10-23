@@ -5,8 +5,8 @@
 
 For the catalog commit and the engine commit a release is built from:
 
-  1. Refuses unless both are full 40-hex commits and the catalog commit's `.framework-ref`
-     is the engine commit (the plugin repos build with the framework the catalog declares).
+  1. Refuses unless both are full 40-hex commits, the catalog commit is the head of the catalog's `main`,
+     and the catalog commit's `.framework-ref` is the engine commit (the repos build with the declared framework).
      Also refuses, before dispatching anything, when a plugin repo's `.github/requirements/framework.txt`
      pins an agentseam version other than the one the engine commit's pyproject.toml requires (`agentseam==X`;
      a direct `@ git+` reference is a refusal too): the build would crash. It prints repo and both versions.
@@ -28,7 +28,7 @@ A real run publishes; it is the owner's. An agent runs --dry-run only.
 One repo failing does not stop the others (a re-run publishes nothing twice: "No change to publish").
 
 `verify` regenerates from the catalog's `main`, so it is only green when the catalog commit is the
-head of the catalog's `main`; the command warns when it is not.
+head of the catalog's `main`; the command refuses when it is not (the catalog is merge-first).
 
 The token comes from GITHUB_TOKEN and is never printed. GitHub only, over https.
 Exit codes: 0 done, 1 refused or failed, 2 usage error.
@@ -60,27 +60,6 @@ TIMEOUT_SECONDS = 45 * 60
 
 class Refused(Exception):
     """The command stops: nothing it printed after this point is true."""
-
-
-def provenance(text: str) -> tuple[str | None, str | None] | None:
-    """(catalog sha, engine sha) a plugin repo's generated_from.yaml names, or None when unreadable.
-
-    Two layouts exist: what publish.yml writes (`catalog: {sha}`, `framework: {sha}`) and the
-    `generated_from: {catalog, engine}` mapping check.py's check 5 reads.
-    """
-    try:
-        data = check.load_yaml(text)
-    except check.yaml.YAMLError:
-        return None
-    if not isinstance(data, dict):
-        return None
-    flat = data.get("generated_from")
-    if isinstance(flat, dict):
-        return flat.get("catalog"), flat.get("engine")
-    catalog, framework = data.get("catalog"), data.get("framework")
-    if isinstance(catalog, dict) and isinstance(framework, dict):
-        return catalog.get("sha"), framework.get("sha")
-    return None
 
 
 class Plugins:
@@ -131,9 +110,9 @@ class Plugins:
         head = self.get(check.CATALOG, f"/git/ref/heads/{BRANCH}")
         main = head.get("object", {}).get("sha") if isinstance(head, dict) else None
         if main != self.catalog:
-            self.out(
-                f"WARNING: {check.CATALOG} {BRANCH} is {main}, not {self.catalog}; the plugin repos' "
-                f"{VERIFY_JOB} job regenerates from {BRANCH} and will be red until they agree"
+            raise Refused(
+                f"{check.CATALOG} {self.catalog} is not the head of its {BRANCH} ({main}): the catalog is merge-first, "
+                f"and the plugin repos' {VERIFY_JOB} job regenerates from {BRANCH}, so it can only go green at its head"
             )
         self.agentseam_pins()
 
@@ -261,12 +240,12 @@ class Plugins:
         if not isinstance(data, dict) or data.get("encoding") != "base64":
             raise Refused(f"{repo}: no {check.PLUGIN_PROVENANCE_FILE} at {head}")
         text = base64.b64decode(data.get("content", "")).decode("utf-8", "replace")
-        got = provenance(text)
+        got = check.plugin_provenance(text)
         if got is None:
             raise Refused(f"{repo}: {check.PLUGIN_PROVENANCE_FILE} at {head} names no catalog and engine commit")
         self.out(f"{repo}: {BRANCH} is now {head}")
-        self.out(f"{repo}: {check.PLUGIN_PROVENANCE_FILE}: catalog {got[0]}, engine {got[1]}")
-        for label, have, want in (("catalog", got[0], self.catalog), ("engine", got[1], self.engine)):
+        self.out(f"{repo}: {check.PLUGIN_PROVENANCE_FILE}: catalog {got[0]}, framework {got[1]}")
+        for label, have, want in (("catalog", got[0], self.catalog), ("framework", got[1], self.engine)):
             if have != want:
                 raise Refused(f"{repo}: {check.PLUGIN_PROVENANCE_FILE} names {label} {have!r}, not {want}")
 

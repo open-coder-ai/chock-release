@@ -474,13 +474,13 @@ def test_refuses_catalog_version_file_missing(world, run):
 # Check 5 ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("key", ["catalog", "engine"])
-def test_refuses_plugin_generated_from_mismatch(world, run, key):
-    gen = {"catalog": world.commits["chock-catalog"], "engine": world.commits["chock"]}
-    gen[key] = sha("stale")
-    world.put("chock-cursor-plugins", "generated_from.yaml", yaml.safe_dump({"generated_from": gen}))
+@pytest.mark.parametrize("section", ["catalog", "framework"])
+def test_refuses_plugin_generated_from_mismatch(world, run, section):
+    gen = {"catalog": {"sha": world.commits["chock-catalog"]}, "framework": {"sha": world.commits["chock"]}}
+    gen[section] = {"sha": sha("stale")}
+    world.put("chock-cursor-plugins", "generated_from.yaml", yaml.safe_dump(gen))
     _, result = run(world)
-    assert_refused(result, f"check 5: chock-cursor-plugins: generated_from.{key}")
+    assert_refused(result, f"check 5: chock-cursor-plugins: {section}.sha")
 
 
 def test_refuses_plugin_without_provenance(world, run):
@@ -489,18 +489,29 @@ def test_refuses_plugin_without_provenance(world, run):
     assert_refused(result, "chock-codex-plugins: generated_from.yaml not found")
 
 
+def test_refuses_plugin_provenance_in_the_old_layout(world, run):
+    c = world.commits
+    world.put(
+        "chock-claude-plugins",
+        "generated_from.yaml",
+        f"generated_from: {{catalog: {c['chock-catalog']}, engine: {c['chock']}}}\n",
+    )
+    _, result = run(world)
+    assert_refused(result, "check 5: chock-claude-plugins: generated_from.yaml has no catalog.sha and framework.sha")
+
+
 def test_refuses_plugin_malformed_provenance(world, run):
     world.put("chock-claude-plugins", "generated_from.yaml", "catalog: x\n")
     _, result = run(world)
-    assert_refused(result, "check 5: chock-claude-plugins: generated_from.yaml has no generated_from mapping")
+    assert_refused(result, "check 5: chock-claude-plugins: generated_from.yaml has no catalog.sha and framework.sha")
 
 
 def test_refuses_plugin_provenance_with_duplicate_keys(world, run):
     c = world.commits
-    text = f"generated_from:\n  catalog: {sha('old')}\n  catalog: {c['chock-catalog']}\n  engine: {c['chock']}\n"
+    text = f"catalog:\n  sha: {sha('old')}\n  sha: {c['chock-catalog']}\nframework:\n  sha: {c['chock']}\n"
     world.put("chock-claude-plugins", "generated_from.yaml", text)
     _, result = run(world)
-    assert_refused(result, "check 5: chock-claude-plugins: generated_from.yaml has no generated_from mapping")
+    assert_refused(result, "check 5: chock-claude-plugins: generated_from.yaml has no catalog.sha and framework.sha")
 
 
 # Check 6 ---------------------------------------------------------------------------
@@ -670,7 +681,7 @@ def test_reports_every_mismatch_at_once(world, run):
     world.green("chock", conclusion="failure")
     world.put("chock", "pyproject.toml", '[project]\nversion = "0.0.1"\n')
     world.put("chock-catalog", "VERSION", "0.0.1")
-    world.put("chock-devin-plugins", "generated_from.yaml", "generated_from: {catalog: a, engine: b}\n")
+    world.put("chock-devin-plugins", "generated_from.yaml", "catalog: {sha: a}\nframework: {sha: b}\n")
     world.put("chock-site", ".catalog-ref", sha("old"))
     world.put("chock-example", "requirements.txt", "chock==0.0.1\n")
     world.tags["chock-quickstart"] = {"object": {"type": "commit", "sha": sha("elsewhere")}}
