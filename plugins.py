@@ -7,6 +7,10 @@ For the catalog commit and the engine commit a release is built from:
 
   1. Refuses unless both are full 40-hex commits and the catalog commit's `.framework-ref`
      is the engine commit (the plugin repos build with the framework the catalog declares).
+     Also refuses, before dispatching anything, when a plugin repo's `.github/requirements/framework.txt`
+     pins an agentseam version other than the one the engine commit's pyproject.toml requires (`agentseam==X`;
+     a direct `@ git+` reference is a refusal too): the build would crash. It prints repo and both versions.
+     It does not edit the plugin repos' requirements.
   2. Dispatches `publish.yml` in each plugin repo on `main` (catalog_ref = the catalog sha,
      framework_ref = auto, dry_run as given) and waits for that run to finish green.
   3. Real run only: dispatches `generated-only.yml` on `main` and waits for its `verify` job
@@ -35,8 +39,10 @@ from __future__ import annotations
 import argparse
 import base64
 import os
+import re
 import sys
 import time
+import tomllib
 import urllib.parse
 from collections.abc import Callable
 
@@ -45,6 +51,8 @@ import check
 PUBLISH = "publish.yml"
 VERIFY = "generated-only.yml"
 VERIFY_JOB = "verify"
+FRAMEWORK_LOCK = ".github/requirements/framework.txt"
+LOCK_AGENTSEAM = re.compile(r"^\s*agentseam\s*(?:\[[^\]]*\])?\s*==\s*([0-9A-Za-z.+!*-]+)", re.IGNORECASE | re.MULTILINE)
 BRANCH = "main"
 POLL_SECONDS = 15
 TIMEOUT_SECONDS = 45 * 60
@@ -126,6 +134,65 @@ class Plugins:
             self.out(
                 f"WARNING: {check.CATALOG} {BRANCH} is {main}, not {self.catalog}; the plugin repos' "
                 f"{VERIFY_JOB} job regenerates from {BRANCH} and will be red until they agree"
+            )
+        self.agentseam_pins()
+
+    def file(self, repo: str, path: str, ref: str) -> str | None:
+        data = self.get(repo, f"/contents/{path}?ref={ref}")
+        if not isinstance(data, dict) or data.get("encoding") != "base64":
+            return None
+        return base64.b64decode(data.get("content", "")).decode("utf-8", "replace")
+
+    def engine_agentseam(self) -> str:
+        """The agentseam version the engine commit's pyproject.toml pins with `==`."""
+        text = self.file(check.ENGINE, "pyproject.toml", self.engine)
+        if text is None:
+            raise Refused(f"{check.ENGINE}: no pyproject.toml at {self.engine}")
+        try:
+            project = tomllib.loads(text)["project"]
+        except (tomllib.TOMLDecodeError, KeyError, TypeError):
+            raise Refused(f"{check.ENGINE}: pyproject.toml at {self.engine} has no [project] table") from None
+        deps: list[object] = list(project.get("dependencies") or [])
+        for group in (project.get("optional-dependencies") or {}).values():
+            deps.extend(group or [])
+        pins: set[str] = set()
+        for dep in deps:
+            if not isinstance(dep, str) or check.canonical_name(dep) != check.AGENTSEAM:
+                continue
+            if check.DIRECT_REF.match(dep):
+                raise Refused(
+                    f"{check.ENGINE} {self.engine[:12]} requires {dep!r}, a direct reference: "
+                    "release-week check 3 refuses it, and PyPI rejects it; pin agentseam==<version> first"
+                )
+            m = check.AGENTSEAM_PIN.match(dep)
+            if m is None:
+                raise Refused(f"{check.ENGINE} {self.engine[:12]} requires {dep!r}, which is not agentseam==<version>")
+            pins.add(m.group(1))
+        if len(pins) != 1:
+            raise Refused(
+                f"{check.ENGINE} {self.engine[:12]} pins agentseam to {sorted(pins) or 'nothing'}, not one version"
+            )
+        return pins.pop()
+
+    def agentseam_pins(self) -> None:
+        """Every plugin repo hash-pins the agentseam version the engine needs, else its build crashes."""
+        want = self.engine_agentseam()
+        problems = []
+        for repo in self.repos():
+            text = self.file(repo, FRAMEWORK_LOCK, BRANCH)
+            if text is None:
+                problems.append(f"{repo}: no {FRAMEWORK_LOCK} on {BRANCH}")
+                continue
+            found = sorted(set(LOCK_AGENTSEAM.findall(text)))
+            if found != [want]:
+                problems.append(
+                    f"{repo}: {FRAMEWORK_LOCK} pins agentseam {', '.join(found) or 'nothing'}, "
+                    f"engine {self.engine[:12]} requires {want}"
+                )
+        if problems:
+            raise Refused(
+                "agentseam pin differs, so the plugin build would crash (update the plugin repos' requirements "
+                "first; this command does not):\n  " + "\n  ".join(problems)
             )
 
     def run_ids(self, repo: str, workflow: str) -> set[int]:

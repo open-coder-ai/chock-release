@@ -126,7 +126,9 @@ manifest PR, the owner runs, with a `GITHUB_TOKEN` that has Actions: write on th
 
     python plugins.py publish --catalog <catalog main sha> --engine <engine sha>
 
-It refuses unless the catalog commit's `.framework-ref` is the engine commit. For each repo it dispatches
+It refuses unless the catalog commit's `.framework-ref` is the engine commit, and unless every plugin repo's
+`.github/requirements/framework.txt` pins the agentseam version the engine's `pyproject.toml` requires (it prints
+each repo and both versions; the requirements files are updated in the plugin repos, not by this command). For each repo it dispatches
 `publish.yml` (catalog_ref = the sha, framework auto, dry_run false), waits for the run, dispatches
 `generated-only.yml` on `main` and waits for its `verify` job, then prints the repo's new `main` head and its
 `generated_from.yaml`, and refuses if that file names another catalog or engine commit. `--only <repo>`

@@ -15,6 +15,11 @@ from conftest import sha
 CATALOG = sha("catalog-commit")
 ENGINE = sha("engine-commit")
 OLD = sha("old")
+ENGINE_PYPROJECT = '[project]\nname = "chock"\ndependencies = ["pyyaml>=6", "agentseam==0.4.1"]\n'
+
+
+def lock(version: str) -> str:
+    return f"pyyaml==6.0.2 \\\n    --hash=sha256:aa\nagentseam=={version} \\\n    --hash=sha256:bb\n"
 
 
 def b64(text: str) -> dict:
@@ -47,6 +52,8 @@ class FakeGitHub(check.GitHub):
         self.never_appears: set[tuple[str, str]] = set()
         self.main: dict[str, str] = {r: OLD for r in check.PLUGINS}
         self.provenance: dict[str, str] = {r: flat(CATALOG, ENGINE) for r in check.PLUGINS}
+        self.engine_pyproject = ENGINE_PYPROJECT
+        self.locks: dict[str, str | None] = {r: lock("0.4.1") for r in check.PLUGINS}
         self.dispatched: list[tuple[str, str, dict]] = []
         self.errors: dict[str, str] = {}
         self.next_id = 1000
@@ -57,6 +64,10 @@ class FakeGitHub(check.GitHub):
                 raise check.GitHubError(msg)
         prefix = f"/repos/{check.OWNER}/"
         repo, _, rest = path[len(prefix) :].partition("/")
+        if repo == check.ENGINE and rest.startswith("contents/pyproject.toml"):
+            return b64(self.engine_pyproject)
+        if rest.startswith("contents/.github/requirements/framework.txt"):
+            return b64(self.locks[repo]) if self.locks[repo] is not None else None
         if repo == check.CATALOG and rest.startswith("contents/.framework-ref"):
             return b64(self.framework_ref) if self.framework_ref is not None else None
         if repo == check.CATALOG and rest == "git/ref/heads/main":
@@ -293,3 +304,52 @@ def test_send_accepts_an_empty_204_body(monkeypatch):
         check.GitHub(token="t").send("POST", "/repos/o/r/actions/workflows/w.yml/dispatches", {"ref": "main"}) is None
     )
     assert seen == {"body": {"ref": "main"}, "method": "POST"}
+
+
+def test_refuses_before_dispatching_when_a_plugin_repo_pins_another_agentseam():
+    gh = FakeGitHub()
+    gh.locks["chock-claude-plugins"] = lock("0.3.5")
+    gh.locks["chock-codex-plugins"] = lock("0.3.5")
+    code, out = run_publish(gh)
+    assert code == 1
+    assert "chock-claude-plugins: .github/requirements/framework.txt pins agentseam 0.3.5, engine" in out
+    assert "requires 0.4.1" in out and "chock-codex-plugins:" in out
+    assert "chock-cursor-plugins:" not in out
+    assert gh.dispatched == []
+
+
+def test_only_checks_the_repos_it_will_publish():
+    gh = FakeGitHub()
+    gh.locks["chock-claude-plugins"] = lock("0.3.5")
+    code, _ = run_publish(gh, only=["chock-devin-plugins"])
+    assert code == 0
+
+
+def test_refuses_a_plugin_repo_with_no_agentseam_pin_or_no_lock():
+    gh = FakeGitHub()
+    gh.locks["chock-claude-plugins"] = "pyyaml==6.0.2\n"
+    gh.locks["chock-devin-plugins"] = None
+    code, out = run_publish(gh)
+    assert code == 1
+    assert "chock-claude-plugins: .github/requirements/framework.txt pins agentseam nothing" in out
+    assert "chock-devin-plugins: no .github/requirements/framework.txt on main" in out
+    assert gh.dispatched == []
+
+
+def test_refuses_an_engine_with_a_direct_agentseam_reference():
+    gh = FakeGitHub()
+    gh.engine_pyproject = (
+        '[project]\nname = "chock"\ndependencies = ["agentseam @ git+https://github.com/x/agentseam@abc"]\n'
+    )
+    code, out = run_publish(gh)
+    assert code == 1
+    assert "direct reference" in out and "release-week check 3" in out
+    assert gh.dispatched == []
+
+
+def test_refuses_an_engine_that_does_not_pin_agentseam_with_equals():
+    gh = FakeGitHub()
+    gh.engine_pyproject = '[project]\nname = "chock"\ndependencies = ["agentseam>=0.4"]\n'
+    code, out = run_publish(gh)
+    assert code == 1 and "not agentseam==<version>" in out
+    assert gh.dispatched == []
