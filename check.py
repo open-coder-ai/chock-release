@@ -107,7 +107,7 @@ AGENTSEAM_VERSION_FILE = "pyproject.toml"  # [project].version of agentseam
 CATALOG_VERSION_FILE = "VERSION"  # one line: the train version
 FRAMEWORK_REF_FILE = ".framework-ref"
 CATALOG_REF_FILE = ".catalog-ref"
-PLUGIN_PROVENANCE_FILE = "generated_from.yaml"  # generated_from: {catalog, engine}
+PLUGIN_PROVENANCE_FILE = "generated_from.yaml"  # publish.yml's layout: catalog: {sha}, framework: {sha}
 SITE_VERSION_FILE = "data/version.json"  # {"version": ...}
 SITE_AGENTSEAM_FILE = "data/agentseam-source/source.json"  # {"agentseam_ref": <commit>, ...}
 PIN_FILES = ("README.md", "docs/README.md", "requirements.txt", "pyproject.toml")
@@ -162,7 +162,7 @@ NETWORK_ERRORS = (OSError, http.client.HTTPException, json.JSONDecodeError)
 
 
 class GitHub:
-    """Minimal GitHub REST client. get() returns parsed JSON, or None on 404; send() is for rc.py prs."""
+    """Minimal GitHub REST client. get() returns parsed JSON, or None on 404; send() writes (rc.py prs, plugins.py)."""
 
     def __init__(self, token: str | None = None, api: str = "https://api.github.com"):
         self._token = token
@@ -189,7 +189,7 @@ class GitHub:
             raise GitHubError(f"GET {path}: {type(exc).__name__}") from None
 
     def send(self, method: str, path: str, body: dict) -> object | None:
-        """POST or PATCH <body> as JSON (rc.py prs only): parsed JSON; HTTP errors name path and status."""
+        """POST or PATCH <body> as JSON: parsed JSON, None for an empty body; HTTP errors name path and status."""
         if method not in ("POST", "PATCH"):
             raise ValueError("send takes POST or PATCH")
         req = urllib.request.Request(  # noqa: S310 (https base, set in __init__)
@@ -203,7 +203,8 @@ class GitHub:
             req.add_header("Authorization", f"Bearer {self._token}")
         try:
             with OPENER.open(req, timeout=30) as resp:  # noqa: S310 (fixed https base)
-                return json.load(resp)
+                raw = resp.read()
+                return json.loads(raw) if raw.strip() else None  # a workflow dispatch answers 204, empty
         except urllib.error.HTTPError as exc:
             raise GitHubError(f"{method} {path}: HTTP {exc.code}") from None
         except NETWORK_ERRORS as exc:
@@ -241,6 +242,18 @@ class Manifest:
 
     def commit_of(self, repo: str) -> str | None:
         return self.repos.get(repo) or self.inputs.get(repo)
+
+
+def plugin_provenance(text: str) -> tuple[object, object] | None:
+    """(catalog sha, framework sha) a plugin repo's generated_from.yaml names, or None when unreadable.
+
+    The one layout publish.yml writes: `catalog: {repository, ref, sha}` and `framework: {repository, ref, sha}`.
+    """
+    try:
+        data = load_yaml(text)
+        return data["catalog"]["sha"], data["framework"]["sha"]
+    except (yaml.YAMLError, KeyError, TypeError):
+        return None
 
 
 @dataclass
@@ -688,18 +701,15 @@ class Checker:
         text = self._file(repo, PLUGIN_PROVENANCE_FILE, soft=True)
         if text is None:
             return
-        try:
-            data = load_yaml(text)
-            gen = data["generated_from"]
-            recorded = {"catalog": gen.get("catalog"), "engine": gen.get("engine")}
-        except (yaml.YAMLError, KeyError, TypeError, AttributeError):
-            self._refuse(f"check 5: {repo}: {PLUGIN_PROVENANCE_FILE} has no generated_from mapping", soft=True)
+        recorded = plugin_provenance(text)
+        if recorded is None:
+            self._refuse(f"check 5: {repo}: {PLUGIN_PROVENANCE_FILE} has no catalog.sha and framework.sha", soft=True)
             return
-        for key, source in (("catalog", CATALOG), ("engine", ENGINE)):
+        for section, got, source in (("catalog", recorded[0], CATALOG), ("framework", recorded[1], ENGINE)):
             want = self.m.repos.get(source)
-            if recorded[key] != want:
+            if got != want:
                 self._refuse(
-                    f"check 5: {repo}: generated_from.{key} is {recorded[key]!r}, manifest {source} is {want!r}",
+                    f"check 5: {repo}: {section}.sha is {got!r}, manifest {source} is {want!r}",
                     soft=True,
                 )
 

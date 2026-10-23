@@ -15,7 +15,7 @@ select = ["E", "F", "W", "I", "B", "UP", "S", "SIM"]
 "tests/**" = ["S101", "S105", "S106", "S324", "S603", "S607"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["check", "rc", "release", "conftest"]
+known-first-party = ["check", "plugins", "rc", "release", "conftest"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
