@@ -4,7 +4,8 @@ version: 1.0.0
 base: main
 repos:
   # 318 before 320: chock#320 is built on chock#318. 314 and 315 are already on chock's rc.
-  # 321 (stable render, fixes IR-F13) after 320; its .chock/bin/** is re-rendered by the owner's chock sync on rc.
+  # 321 (stable render, fixes IR-F13) after 320; its .chock/bin/** is re-rendered by the owner's chock sync on rc,
+  # and tests/fixtures/runtime_goldens/** (frozen renders; #319/#320 and #321 both re-render them) by CHOCK_REGEN_GOLDENS=1 on rc.
   chock:                 [314, 315, 318, 319, 320, 321]
   # chock-catalog is merge-first, not assembled: these PRs are merged to the catalog's main first (gated by its own
   # CI; the owner merges), then rc.py pins pins the catalog's main head. rc.py assemble and prs skip it.
@@ -27,6 +28,7 @@ repos:
 regenerated:
   chock:
     - .chock/bin/**
+    - tests/fixtures/runtime_goldens/**
   chock-site:
     - .framework-ref
     - .catalog-ref

@@ -606,7 +606,7 @@ def test_the_shipped_candidate_file_is_valid_and_matches_ir_3():
     assert cand is not None, result.errors
     assert cand.prs["chock-site"] == [78, 80] and cand.prs["chock"] == [314, 315, 318, 319, 320, 321]
     assert set(cand.regenerated) == {"chock", "chock-site"} and ".framework-ref" in cand.regenerated["chock-site"]
-    assert cand.regenerated["chock"] == [".chock/bin/**"]
+    assert cand.regenerated["chock"] == [".chock/bin/**", "tests/fixtures/runtime_goldens/**"]
     assert cand.prs["chock-quickstart"] == [] and cand.prs["chock-example"] == []
     assert cand.prs[CATALOG] == [293, 295, 297]  # merged by the owner first, never assembled
     assert yaml.safe_load((SHIPPED).read_text())["base"] == "main"
