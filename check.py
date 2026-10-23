@@ -162,7 +162,7 @@ NETWORK_ERRORS = (OSError, http.client.HTTPException, json.JSONDecodeError)
 
 
 class GitHub:
-    """Minimal GitHub REST client. get() returns parsed JSON, or None on 404; send() is for rc.py prs."""
+    """Minimal GitHub REST client. get() returns parsed JSON, or None on 404; send() writes (rc.py prs, plugins.py)."""
 
     def __init__(self, token: str | None = None, api: str = "https://api.github.com"):
         self._token = token
@@ -189,7 +189,7 @@ class GitHub:
             raise GitHubError(f"GET {path}: {type(exc).__name__}") from None
 
     def send(self, method: str, path: str, body: dict) -> object | None:
-        """POST or PATCH <body> as JSON (rc.py prs only): parsed JSON; HTTP errors name path and status."""
+        """POST or PATCH <body> as JSON: parsed JSON, None for an empty body; HTTP errors name path and status."""
         if method not in ("POST", "PATCH"):
             raise ValueError("send takes POST or PATCH")
         req = urllib.request.Request(  # noqa: S310 (https base, set in __init__)
@@ -203,7 +203,8 @@ class GitHub:
             req.add_header("Authorization", f"Bearer {self._token}")
         try:
             with OPENER.open(req, timeout=30) as resp:  # noqa: S310 (fixed https base)
-                return json.load(resp)
+                raw = resp.read()
+                return json.loads(raw) if raw.strip() else None  # a workflow dispatch answers 204, empty
         except urllib.error.HTTPError as exc:
             raise GitHubError(f"{method} {path}: HTTP {exc.code}") from None
         except NETWORK_ERRORS as exc:

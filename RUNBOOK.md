@@ -117,6 +117,26 @@ chock depends on agentseam. PyPI rejects a direct-reference dependency
    `pyproject.toml` version with chock's pin, and check 6 compares it with the site's
    `data/agentseam-source/source.json`.
 
+## Plugin repos (D9 A2)
+
+The five per-policy repos (`chock-claude-plugins`, `-cursor-`, `-codex-`, `-copilot-`, `-devin-`) stay
+published for teams that cannot install chock. They are rebuilt from the catalog, so each release
+republishes them. In the release prep, after the catalog's adopt-framework PR is merged and before the
+manifest PR, the owner runs, with a `GITHUB_TOKEN` that has Actions: write on the five repos:
+
+    python plugins.py publish --catalog <catalog main sha> --engine <engine sha>
+
+It refuses unless the catalog commit's `.framework-ref` is the engine commit. For each repo it dispatches
+`publish.yml` (catalog_ref = the sha, framework auto, dry_run false), waits for the run, dispatches
+`generated-only.yml` on `main` and waits for its `verify` job, then prints the repo's new `main` head and its
+`generated_from.yaml`, and refuses if that file names another catalog or engine commit. `--only <repo>`
+(repeatable) re-runs part of the five after a failure. `verify` regenerates from the catalog's `main`, so the
+catalog commit must be its head (the command warns when it is not).
+
+`--dry-run` dispatches `publish.yml` with `dry_run=true` (it builds and prints the diff, pushes nothing) and
+skips the verify and provenance steps. An agent runs `--dry-run` only; a real run publishes, so it is the owner's.
+Check 5 then reads the same `generated_from.yaml` files, so a release cannot ship them stale.
+
 Then the prepare phase (plan/release-1.md): version files and pins in every train repo,
 each through a normal PR, then the manifest PR adding `releases/X.Y.Z.yaml` here.
 
