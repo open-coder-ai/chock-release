@@ -1,0 +1,51 @@
+# Release candidate 1.0.0-rc.2: the PRs to merge into each train repo's `rc` branch, in order.
+# Source: org-plan plan/internal-release.md, IR-23 (D11 A). rc.1's lists plus the Devin-review hardening and the
+# windows-adopter fix. Nothing here is tagged or published.
+version: 1.0.0
+base: main
+repos:
+  # 318 before 320: chock#320 is built on chock#318. 314 and 315 are already on chock's rc.
+  # 321 (stable render, fixes IR-F13) after 320; its .chock/bin/** is re-rendered by the owner's chock sync on rc,
+  # and tests/fixtures/runtime_goldens/** (frozen renders; #319/#320 and #321 both re-render them) by CHOCK_REGEN_GOLDENS=1 on rc.
+  # 323 (SR-1, D11 A): engine hardening from the Devin review (log writes refuse non-regular files, bundle toggles are
+  # person-only, the launcher accepts chock.python only if it is Python).
+  # 324 (SR-3, D11 A): engine hardening round 2 from the Claude Security chock scan (agent-disables-enforcement findings).
+  # 325 (SR-5): command output never crashes on a character the stream's encoding cannot represent (IR-F18, the Windows walk-through).
+  # 326 (SR-6): test-only; removes a flaky timing failure from rc's CI.
+  # All four come after 321. .chock/bin/** and the goldens are re-rendered on rc as for rc.1.
+  chock:                 [314, 315, 318, 319, 320, 321, 323, 324, 325, 326]
+  # chock-catalog is merge-first, not assembled: these PRs are merged to the catalog's main first (gated by its own
+  # CI; the owner merges), then rc.py pins pins the catalog's main head. rc.py assemble and prs skip it.
+  # 293, 295 and 297 are already merged on the catalog's main (af010c7).
+  # 301 (SR-1c, D11 A): catalog guards matching SR-1 (block-no-verify, protect-agent-config); merged on main at 95ff722.
+  chock-catalog:         [293, 295, 297, 301]
+  chock-claude-plugins:  [16]
+  chock-cursor-plugins:  [15]
+  chock-codex-plugins:   [15]
+  chock-copilot-plugins: [14]
+  chock-devin-plugins:   [9]
+  # chock-site#11 was merged to main (about 02:08Z); assemble refuses a listed PR that is not open, so it is no longer listed.
+  # chock-site#81 and #82 went straight to the site's main, so they are not listed.
+  # 84 (IR-22): the adopt walk-through records the real `chock add` result at the rc.2 catalog pin, and the build refuses a recorded step whose exit differs.
+  chock-site:            [78, 80, 84]
+  chock-quickstart:      []
+  chock-example:         []
+# Paths the candidate rewrites on `rc` after assembly (rc.py pins, then chock-site's own regeneration:
+# sitegen cliexamples --record, catalogdoc, writedoc --record, docsource, agentseamdoc snapshot and
+# run --record; pins also moves the engine commit in engine-commit.txt and the architecture diagrams). A merge conflict confined to these is resolved by taking the PR's side; anything
+# else still refuses.
+regenerated:
+  chock:
+    - .chock/bin/**
+    - tests/fixtures/runtime_goldens/**
+  chock-site:
+    - .framework-ref
+    - .catalog-ref
+    - data/catalog-source/**
+    - data/docs-source/**
+    - data/write-source/**
+    - data/cli-examples/**
+    - data/agentseam-source/**
+    - data/agentseam-run.json
+    - data/kinds/engine-commit.txt
+    - data/architecture/*.json
