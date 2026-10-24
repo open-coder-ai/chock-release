@@ -647,6 +647,67 @@ def test_only_is_repeatable_and_a_repo_outside_the_candidate_is_a_usage_error(ca
     assert "not in" in capsys.readouterr().err
 
 
+# hardening --------------------------------------------------------------------------------
+
+
+def test_a_rename_that_hides_a_deletion_refuses(remote, gh):
+    # PR 1 edits app.txt; PR 2 deletes it and adds a similar file under a regenerated glob. Rename
+    # detection would report only the new file as unmerged and the deletion would be taken silently.
+    remote.pr("chock-site", 1, {"app.txt": "line1\nline2 changed\nline3\n"})
+    work = remote.root / "work-delete"
+    git("clone", "--quiet", str(remote.path("chock-site")), str(work))
+    git("checkout", "--quiet", "-B", "tmp", "origin/main", cwd=work)
+    (work / "data/snap").mkdir(parents=True)
+    git("mv", "app.txt", "data/snap/moved.txt", cwd=work)
+    git("commit", "--quiet", "-m", "move", cwd=work)
+    git("push", "--quiet", "origin", "HEAD:refs/pull/2/head", cwd=work)
+    r, lines = make(remote, gh, candidate({"chock-site": ["data/snap/**"]}, chock_site=[1, 2]))
+    assert r.assemble(reset=False) == 1
+    assert remote.head("chock-site", "refs/heads/rc") is None
+    assert any(e.startswith("REFUSED chock-site:") and "CONFLICT" in e for e in lines.err), lines.err
+
+
+def commit_symlink(remote, repo: str, ref: str, links: dict[str, str]) -> None:
+    work = remote.root / f"work-link-{repo}-{len(list(remote.root.glob('work-*')))}"
+    git("clone", "--quiet", str(remote.path(repo)), str(work))
+    git("checkout", "--quiet", "-B", "tmp", "origin/main", cwd=work)
+    for name, target in links.items():
+        (work / name).unlink(missing_ok=True)
+        (work / name).symlink_to(target)
+    git("add", ".", cwd=work)
+    git("commit", "--quiet", "-m", "links", cwd=work)
+    git("push", "--quiet", "origin", f"HEAD:refs/heads/{ref}", cwd=work)
+
+
+def test_pins_refuses_a_symlink_at_a_path_it_writes(remote, gh, tmp_path):
+    outside = tmp_path / "outside.txt"
+    outside.write_text("keep\n", encoding="utf-8")
+    remote.pr("chock", 1, {"one.txt": "1\n"})
+    make(remote, gh, candidate(chock=[1]))[0].assemble(reset=False)
+    commit_symlink(remote, "chock-site", "rc", {".framework-ref": str(outside)})
+    r, lines = make(remote, gh, candidate())
+    assert r.pins() == 1
+    assert outside.read_text(encoding="utf-8") == "keep\n"
+    assert any("symlink" in e for e in lines.err), lines.err
+
+
+def test_pin_lines_show_only_a_40_hex_sha(remote, gh):
+    remote.commit(
+        "chock-site", "rc", {".catalog-ref": "x\n## Injected\n@owner Closes #1\n", ".framework-ref": "a" * 40 + "\n"}
+    )
+    r, _ = make(remote, gh, candidate())
+    assert r.pin_lines("chock-site") == ["- .catalog-ref: unreadable", f"- .framework-ref: {'a' * 40}"]
+
+
+def test_a_malformed_ref_answer_is_not_a_head(remote, gh):
+    r, _ = make(remote, gh, candidate())
+    gh_get = gh.get
+    gh.get = lambda path: (
+        {"object": {"sha": "not-a-sha; --upload-pack=x"}} if "git/ref/heads/" in path else gh_get(path)
+    )
+    assert r.rc_head("chock") is None and r.base_head("chock") is None
+
+
 # prs --------------------------------------------------------------------------------------
 
 TITLE = f"Release candidate {VERSION}-rc.1: do not merge"

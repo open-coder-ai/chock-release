@@ -231,6 +231,16 @@ def test_build_fetches_the_manifest_commit_and_scrubs_credentials(tmp_path, monk
     assert "sha256=" in out and "nothing uploaded" in out and "t0ken-value" not in out
 
 
+@pytest.mark.parametrize(
+    "name", ["GH_PAT", "GITHUB_PAT", "SSH_AUTH_SOCK", "GIT_ASKPASS", "NPM_CONFIG__AUTH", "GITHUB_TOKEN"]
+)
+def test_scrubbed_env_drops_credential_looking_names(monkeypatch, name):
+    monkeypatch.setenv(name, "value")
+    monkeypatch.setenv("HOME", "/h")
+    env = release.scrubbed_env()
+    assert name not in env and env["HOME"] == "/h"
+
+
 def test_build_refuses_what_pypi_would_refuse(tmp_path):
     m = check.Manifest(VERSION, {check.ENGINE: sha("chock")}, {})
     bad = lambda: metadata(requires=("agentseam @ https://example.invalid/a.tar.gz",))  # noqa: E731
