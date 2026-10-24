@@ -282,6 +282,8 @@ class Candidate:
     prs: dict[str, list[int]]
     # repo -> path globs the candidate rewrites on `rc` after assembly (rc.py assemble may take a PR's side there)
     regenerated: dict[str, list[str]] = field(default_factory=dict)
+    # repo -> {PR number: "<owner>/<repo>" of the one fork that PR may be opened from}
+    forks: dict[str, dict[int, str]] = field(default_factory=dict)
 
 
 def looks_like_candidate(path: Path) -> bool:
@@ -313,6 +315,32 @@ def load_regenerated(raw: object, result: Result) -> dict[str, list[str]]:
     return globs
 
 
+FORK_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9._-]+")
+
+
+def load_forks(raw: object, prs: dict[str, list[int]], result: Result) -> dict[str, dict[int, str]]:
+    """The optional `forks:` mapping, repo to {PR number: "<owner>/<repo>"}; shape errors go to result."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        result.refuse("candidate: 'forks' must be a mapping of repo to {PR number: <owner>/<repo>}")
+        return {}
+    forks: dict[str, dict[int, str]] = {}
+    for name, table in raw.items():
+        if name not in TRAIN:
+            result.refuse(f"candidate: forks.{name} is not in the train")
+        elif not isinstance(table, dict) or not all(type(n) is int for n in table):
+            result.refuse(f"candidate: forks.{name} must be a mapping of PR number to <owner>/<repo>, got {table!r}")
+        else:
+            for number, fork in table.items():
+                if not isinstance(fork, str) or not FORK_NAME.fullmatch(fork):
+                    result.refuse(f"candidate: forks.{name} #{number} must be an <owner>/<repo> name, got {fork!r}")
+                elif number not in prs.get(name, []):
+                    result.refuse(f"candidate: forks.{name} #{number} is not a PR the candidate lists")
+            forks[name] = table
+    return forks
+
+
 def load_candidate(path: Path, result: Result) -> Candidate | None:
     """Parse and validate candidates/<version>-rc.<n>.yaml. Shape errors go to result."""
     named = CANDIDATE_NAME.fullmatch(path.name)
@@ -327,7 +355,7 @@ def load_candidate(path: Path, result: Result) -> Candidate | None:
     if not isinstance(data, dict):
         result.refuse("candidate: top level must be a mapping")
         return None
-    for key in sorted(set(data) - {"version", "base", "repos", "regenerated"}, key=str):
+    for key in sorted(set(data) - {"version", "base", "repos", "regenerated", "forks"}, key=str):
         result.refuse(f"candidate: unknown top-level key '{key}'")
     version = data.get("version")
     if not isinstance(version, str) or not SEMVER.fullmatch(version):
@@ -356,9 +384,12 @@ def load_candidate(path: Path, result: Result) -> Candidate | None:
     for name in sorted(set(raw) - set(TRAIN), key=str):
         result.refuse(f"candidate: repos.{name} is not in the train")
     regenerated = load_regenerated(data.get("regenerated"), result)
+    forks = load_forks(data.get("forks"), prs, result)
     if not result.ok or named is None:
         return None
-    return Candidate(version=version, rc=int(named.group(2)), base=CANDIDATE_BASE, prs=prs, regenerated=regenerated)
+    return Candidate(
+        version=version, rc=int(named.group(2)), base=CANDIDATE_BASE, prs=prs, regenerated=regenerated, forks=forks
+    )
 
 
 def load_manifest(path: Path, result: Result) -> Manifest | None:
