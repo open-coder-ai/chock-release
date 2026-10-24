@@ -48,10 +48,12 @@ DEFAULT_SITE = "https://chock-site.pages.dev"
 ENGINE_URL = f"https://github.com/{check.OWNER}/{check.ENGINE}"
 WANT_KINDS = ("bdist_wheel", "sdist")
 SHA256 = re.compile(r"[0-9a-f]{64}")
-# Dropped from the build's environment: anything that looks like a credential, and git's
-# command-line config injection (GIT_CONFIG_COUNT/KEY_n/VALUE_n), which CI uses to pass
-# credential helpers to git.
-SECRET_ENV = re.compile(r"TOKEN|SECRET|KEY|PASSWORD|CREDENTIAL|^GIT_CONFIG_", re.IGNORECASE)
+# Dropped from the build's environment: names that look like a credential (best-effort: a name
+# pattern cannot know every credential), and git's command-line config injection
+# (GIT_CONFIG_COUNT/KEY_n/VALUE_n), which CI uses to pass credential helpers to git.
+SECRET_ENV = re.compile(
+    r"TOKEN|SECRET|KEY|PASSWORD|CREDENTIAL|ASKPASS|(^|_)(PAT|AUTH)($|_)|^GIT_CONFIG_", re.IGNORECASE
+)
 
 
 class GitHubWriter(check.GitHub):

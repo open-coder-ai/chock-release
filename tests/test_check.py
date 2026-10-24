@@ -322,6 +322,50 @@ def test_runs_on_a_tag_or_another_branch_are_not_read(world, run):
     assert result.ok, result.errors
 
 
+def test_runs_from_a_fork_are_not_this_repos_ci(world, run):
+    # A fork's PR run can carry the same head_sha and head_branch; only runs of the repo itself count.
+    fork = {"full_name": "someone/chock"}
+    world.add_run(
+        "chock",
+        "ci.yml",
+        created_at="2026-02-01T00:00:00Z",
+        head_repository=fork,
+        status="in_progress",
+        conclusion=None,
+    )
+    world.add_run("chock", "ci.yml", created_at="2026-03-01T00:00:00Z", head_repository=fork, conclusion="cancelled")
+    _, result = run(world)
+    assert result.ok, result.errors
+
+
+def test_a_run_of_the_repo_itself_still_counts(world, run):
+    own = {"full_name": f"{check.OWNER}/chock"}
+    world.add_run("chock", "ci.yml", created_at="2026-02-01T00:00:00Z", head_repository=own, conclusion="failure")
+    _, result = run(world)
+    assert_refused(result, "check 2: chock: ci.yml run")
+
+
+def test_the_version_is_checked_before_the_manifest_file_is_read(tmp_path, world):
+    path = tmp_path / "unvalidated-path.yaml"
+    path.write_text("base: main\n", encoding="utf-8")  # shaped like a candidate
+    _, result = check.check(path, world, "../x")
+    assert any("version must be MAJOR.MINOR.PATCH" in e for e in result.errors), result.errors
+    assert not any("release candidate" in e for e in result.errors)
+
+
+def test_a_non_integer_total_count_is_a_refusal_not_a_crash(world):
+    class Odd(type(world)):
+        def get(self, path):
+            if "/jobs" in path:
+                return {"total_count": "not-an-int", "jobs": [{"name": "x"}]}
+            return super().get(path)
+
+    odd = Odd.consistent()
+    checker = check.Checker(odd, check.Manifest(VERSION, {}, {}), check.Result())
+    assert checker._pages("chock", "/actions/runs/1/jobs", "jobs") is None
+    assert any("cannot read" in e for e in checker.r.errors)
+
+
 def test_refuses_failed_commit_status(world, run):
     world.statuses["chock-site"] = {"state": "failure", "statuses": [{"context": "ci", "state": "failure"}]}
     _, result = run(world)
