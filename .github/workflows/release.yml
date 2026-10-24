@@ -147,7 +147,34 @@ jobs:
             echo "release $tag already exists in $GH_REPO, left as is"
             exit 0
           fi
-          if existing="$(gh api "repos/${GH_REPO}/git/ref/tags/${tag}" --jq .object.sha 2>&1)"; then
+          # Only a 404 means "no such tag". Any other failure (auth, rate limit, 5xx) stops the
+          # step rather than falling through to `gh release create`.
+          if ! out="$(gh api "repos/${GH_REPO}/git/ref/tags/${tag}" 2>&1)"; then
+            case "$out" in
+              *"HTTP 404"*) out="" ;;
+              *)
+                echo "could not look up tag $tag in $GH_REPO: $out" >&2
+                exit 1
+                ;;
+            esac
+          fi
+          if [ -n "$out" ]; then
+            kind="$(jq -r '.object.type' <<<"$out")"
+            existing="$(jq -r '.object.sha' <<<"$out")"
+            # An annotated tag points at a tag object: follow it (bounded) to the commit it names.
+            for _ in 1 2 3 4 5; do
+              [ "$kind" = "tag" ] || break
+              if ! out="$(gh api "repos/${GH_REPO}/git/tags/${existing}" 2>&1)"; then
+                echo "could not read tag object $existing of $tag in $GH_REPO: $out" >&2
+                exit 1
+              fi
+              kind="$(jq -r '.object.type' <<<"$out")"
+              existing="$(jq -r '.object.sha' <<<"$out")"
+            done
+            if [ "$kind" != "commit" ]; then
+              echo "tag $tag in $GH_REPO does not resolve to a commit (ends at a $kind): refusing" >&2
+              exit 1
+            fi
             if [ "$existing" != "$TARGET" ]; then
               echo "tag $tag already exists in $GH_REPO at $existing, this run is $TARGET: refusing" >&2
               exit 1

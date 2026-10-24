@@ -172,6 +172,11 @@ A round:
    those paths right after. It resolves nothing else: a conflict with any path outside the list, a
    conflict merging `main` into `rc`, and a repo with no entry all refuse as before, naming the
    paths outside the list. Rebuilding `rc` stays the owner's `--reset`.
+   `assemble` merges a listed PR only when its head repository is `open-coder-ai/<repo>`; a PR from
+   any other repository (or whose head repository is gone) is refused before anything is fetched. To
+   merge a reviewed fork PR, name that exact fork for that PR in an optional top-level `forks:` mapping,
+   repo to `{PR number: <owner>/<repo>}`, for example `forks: {chock-site: {7: friend/chock-site}}`. The
+   PR number must also be listed under `repos:`; the allowance covers that one PR from that one fork.
 3. `python rc.py pins candidates/X.Y.Z-rc.N.yaml` adds one commit on chock-site's `rc`
    setting `.catalog-ref` to the catalog's `main` head and `.framework-ref` to the engine's `rc`
    head, so the site build of `rc` is the candidate. The same commit moves the engine commit

@@ -90,6 +90,7 @@ class LocalGH(check.GitHub):
         self.remote = remote
         self.states: dict[tuple[str, int], str] = {}
         self.bases: dict[tuple[str, int], str] = {}
+        self.head_repos: dict[tuple[str, int], str | None] = {}  # (repo, PR) -> head repo name; None = deleted
         self.merged: set[tuple[str, int]] = set()  # PRs GitHub reports as merged (state closed)
         self.rc_prs: dict[str, dict] = {}  # repo -> the open rc -> main PR
         self.sent: list[tuple[str, str, dict]] = []  # every write: (method, path, body)
@@ -146,7 +147,14 @@ class LocalGH(check.GitHub):
                 "state": "closed" if merged else self.states.get((repo, n), "open"),
                 "merged": merged,
                 "base": {"ref": self.bases.get((repo, n), "main")},
-                "head": {"sha": sha},
+                "head": {
+                    "sha": sha,
+                    "repo": (
+                        {"full_name": self.head_repos.get((repo, n), f"{check.OWNER}/{repo}")}
+                        if self.head_repos.get((repo, n), "") is not None
+                        else None
+                    ),
+                },
             }
         if rest.startswith("compare/"):
             a, _, b = rest[len("compare/") :].partition("...")
@@ -163,10 +171,16 @@ class LocalGH(check.GitHub):
         raise AssertionError(f"unexpected GET {path}")
 
 
-def candidate(regenerated: dict[str, list[str]] | None = None, **prs: list[int]) -> check.Candidate:
+def candidate(
+    regenerated: dict[str, list[str]] | None = None,
+    forks: dict[str, dict[int, str]] | None = None,
+    **prs: list[int],
+) -> check.Candidate:
     table = {repo: [] for repo in check.TRAIN}
     table.update({repo.replace("_", "-"): numbers for repo, numbers in prs.items()})
-    return check.Candidate(version=VERSION, rc=1, base="main", prs=table, regenerated=regenerated or {})
+    return check.Candidate(
+        version=VERSION, rc=1, base="main", prs=table, regenerated=regenerated or {}, forks=forks or {}
+    )
 
 
 class Lines:
@@ -370,6 +384,53 @@ def test_pr_against_another_base_or_missing_is_refused(remote, gh):
         r.open_prs("chock")
     r, _ = make(remote, gh, candidate(chock=[404]))
     with pytest.raises(rc.Refused, match="PR #404: not found"):
+        r.open_prs("chock")
+
+
+def test_fork_pr_is_refused_before_anything_is_fetched(remote, gh):
+    remote.pr("chock", 1, {"one.txt": "1\n"})
+    gh.head_repos[("chock", 1)] = "outsider/chock"
+
+    class NoGit(rc.Git):
+        def run(self, *a, **k):
+            raise AssertionError("git must not run for a refused repo")
+
+    r, lines = make(remote, gh, candidate(chock=[1]), git_cls=NoGit)
+    with pytest.raises(rc.Refused, match=r"PR #1: head is outsider/chock, not open-coder-ai/chock"):
+        r.open_prs("chock")
+    with pytest.raises(AssertionError):  # the other repos clone; only chock is refused
+        r.assemble(reset=False)
+    assert any(e.startswith("REFUSED chock:") and "outsider/chock" in e for e in lines.err)
+    assert remote.head("chock", "refs/heads/rc") is None
+
+
+def test_pr_whose_head_repository_is_gone_is_refused(remote, gh):
+    remote.pr("chock", 1, {"one.txt": "1\n"})
+    gh.head_repos[("chock", 1)] = None
+    r, _ = make(remote, gh, candidate(chock=[1]))
+    with pytest.raises(rc.Refused, match="PR #1: no head repository"):
+        r.open_prs("chock")
+
+
+def test_fork_pr_the_candidate_names_is_allowed_and_only_that_fork(remote, gh):
+    sha = remote.pr("chock", 1, {"one.txt": "1\n"})
+    gh.head_repos[("chock", 1)] = "friend/chock"
+    r, _ = make(remote, gh, candidate(chock=[1], forks={"chock": {1: "friend/chock"}}))
+    assert r.open_prs("chock") == {1: sha}
+    gh.head_repos[("chock", 1)] = "outsider/chock"  # the PR now comes from another fork
+    with pytest.raises(
+        rc.Refused, match=r"head is outsider/chock, not open-coder-ai/chock \(allowed fork: friend/chock\)"
+    ):
+        r.open_prs("chock")
+
+
+def test_fork_allowance_for_one_pr_does_not_cover_another(remote, gh):
+    remote.pr("chock", 1, {"one.txt": "1\n"})
+    remote.pr("chock", 2, {"two.txt": "2\n"})
+    gh.head_repos[("chock", 1)] = "friend/chock"
+    gh.head_repos[("chock", 2)] = "friend/chock"
+    r, _ = make(remote, gh, candidate(chock=[1, 2], forks={"chock": {1: "friend/chock"}}))
+    with pytest.raises(rc.Refused, match="PR #2: head is friend/chock"):
         r.open_prs("chock")
 
 
