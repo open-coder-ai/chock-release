@@ -7,13 +7,12 @@ repos:
   # 318 before 320: chock#320 is built on chock#318. 314 and 315 are already on chock's rc.
   # 321 (stable render, fixes IR-F13) after 320; its .chock/bin/** is re-rendered by the owner's chock sync on rc,
   # and tests/fixtures/runtime_goldens/** (frozen renders; #319/#320 and #321 both re-render them) by CHOCK_REGEN_GOLDENS=1 on rc.
-  # 323 (SR-1, D11 A): engine hardening from the Devin review (log writes refuse non-regular files, bundle toggles are
-  # person-only, the launcher accepts chock.python only if it is Python).
+  # chock#323 (SR-1) was merged to main on 2026-10-25 (6e6252d), so it is no longer listed: `rc` carries it through main.
   # 324 (SR-3, D11 A): engine hardening round 2 from the Claude Security chock scan (agent-disables-enforcement findings).
   # 325 (SR-5): command output never crashes on a character the stream's encoding cannot represent (IR-F18, the Windows walk-through).
   # 326 (SR-6): test-only; removes a flaky timing failure from rc's CI.
   # All four come after 321. .chock/bin/** and the goldens are re-rendered on rc as for rc.1.
-  chock:                 [314, 315, 318, 319, 320, 321, 323, 324, 325, 326]
+  chock:                 [314, 315, 318, 319, 320, 321, 324, 325, 326]
   # chock-catalog is merge-first, not assembled: these PRs are merged to the catalog's main first (gated by its own
   # CI; the owner merges), then rc.py pins pins the catalog's main head. rc.py assemble and prs skip it.
   # 293, 295 and 297 are already merged on the catalog's main (af010c7).
