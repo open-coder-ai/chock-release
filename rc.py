@@ -254,11 +254,25 @@ class Rc:
             base = pr.get("base", {}).get("ref")
             if base != self.cand.base:
                 raise Refused(f"{repo} PR #{n}: targets {base!r}, the candidate's base is {self.cand.base!r}")
+            self.require_own_head(repo, n, pr)
             sha = pr.get("head", {}).get("sha")
             if not isinstance(sha, str) or not check.SHA.fullmatch(sha):
                 raise Refused(f"{repo} PR #{n}: no head commit")
             heads[n] = sha
         return heads
+
+    def require_own_head(self, repo: str, n: int, pr: dict) -> None:
+        """Refuse a PR whose head is not in <owner>/<repo>, unless the candidate names that fork for the PR."""
+        own = f"{check.OWNER}/{repo}"
+        head_repo = (pr.get("head") or {}).get("repo")
+        full_name = head_repo.get("full_name") if isinstance(head_repo, dict) else None
+        if not isinstance(full_name, str):
+            raise Refused(f"{repo} PR #{n}: no head repository (deleted fork?)")
+        allowed = self.cand.forks.get(repo, {}).get(n)
+        if full_name in (own, allowed):
+            return
+        hint = f" (allowed fork: {allowed})" if allowed else ""
+        raise Refused(f"{repo} PR #{n}: head is {full_name}, not {own}{hint}; list it under forks: to merge a fork")
 
     # assemble ----------------------------------------------------------------------------
 

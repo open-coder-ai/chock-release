@@ -517,3 +517,38 @@ def test_rc_equal_to_main_with_red_main_ci_is_refused_not_excused(cworld, candid
     ].clear()  # and no run on main at all: the hint to open an rc PR is not offered
     _, result = run_candidate(cworld, candidate_file())
     assert errors(result, "never ran") and not errors(result, "rc.py prs")
+
+
+def _with_forks(value, listed=(7,)):
+    repos = {repo: [] for repo in check.TRAIN}
+    repos["chock-site"] = list(listed)
+    return {"version": VERSION, "base": "main", "repos": repos, "forks": value}
+
+
+@pytest.mark.parametrize(
+    ("value", "needle"),
+    [
+        ("chock-site", "'forks' must be a mapping"),
+        ({"context-report": {7: "a/b"}}, "forks.context-report is not in the train"),
+        ({"chock-site": [7]}, "forks.chock-site must be a mapping of PR number to"),
+        ({"chock-site": {"7": "a/b"}}, "forks.chock-site must be a mapping of PR number to"),
+        ({"chock-site": {7: "not a repo"}}, "forks.chock-site #7 must be an <owner>/<repo> name"),
+        ({"chock-site": {7: "a/b/c"}}, "forks.chock-site #7 must be an <owner>/<repo> name"),
+        ({"chock-site": {7: 3}}, "forks.chock-site #7 must be an <owner>/<repo> name"),
+        ({"chock-site": {8: "a/b"}}, "forks.chock-site #8 is not a PR the candidate lists"),
+    ],
+)
+def test_forks_shape_refusals(candidate_file, value, needle):
+    result = check.Result()
+    assert check.load_candidate(candidate_file(_with_forks(value)), result) is None
+    assert errors(result, needle), result.errors
+
+
+def test_forks_is_optional_and_loaded(candidate_file):
+    data = _with_forks(None)
+    del data["forks"]
+    result = check.Result()
+    assert check.load_candidate(candidate_file(data), result).forks == {}
+    data["forks"] = {"chock-site": {7: "friend/chock-site"}}
+    assert check.load_candidate(candidate_file(data), result).forks == {"chock-site": {7: "friend/chock-site"}}
+    assert result.ok
