@@ -94,6 +94,12 @@ def read_sha(path: Path) -> str | None:
     return text if SHA_RE.fullmatch(text) else None
 
 
+def refuse_symlink(root: Path, path: Path) -> None:
+    """Refuse a write target that is a symlink or resolves outside the clone: a write would follow it."""
+    if path.is_symlink() or not path.resolve().is_relative_to(root.resolve()):
+        raise Refused(f"{path.relative_to(root).as_posix()} is a symlink or resolves outside the clone; not writing it")
+
+
 def rewrite_engine_pins(site: Path, old_shas: set[str], new: str) -> list[str]:
     """Replace each old engine commit by `new` where the site hand-keeps a copy of the engine pin.
 
@@ -104,6 +110,7 @@ def rewrite_engine_pins(site: Path, old_shas: set[str], new: str) -> list[str]:
     changed = []
     paths = [site / ENGINE_COMMIT_FILE, *sorted((site / ARCHITECTURE_DIR).glob("*.json"))]
     for path in paths:
+        refuse_symlink(site, path)
         try:
             text = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
@@ -228,12 +235,12 @@ class Rc:
     def rc_head(self, repo: str) -> str | None:
         ref = self.get(repo, f"/git/ref/heads/{BRANCH}")
         sha = ref.get("object", {}).get("sha") if isinstance(ref, dict) else None
-        return sha if isinstance(sha, str) else None
+        return sha if isinstance(sha, str) and check.SHA.fullmatch(sha) else None
 
     def base_head(self, repo: str) -> str | None:
         ref = self.get(repo, f"/git/ref/heads/{self.cand.base}")
         sha = ref.get("object", {}).get("sha") if isinstance(ref, dict) else None
-        return sha if isinstance(sha, str) else None
+        return sha if isinstance(sha, str) and check.SHA.fullmatch(sha) else None
 
     def open_prs(self, repo: str) -> dict[int, str]:
         """PR number -> head sha, refusing a PR that is missing, not open, or not against the base."""
@@ -330,10 +337,15 @@ class Rc:
         git = self.git
         if git.run(["merge-base", "--is-ancestor", ref, "HEAD"], dest, ok=True).returncode == 0:
             return  # already contained: a repeat round adds nothing
-        proc = git.run(["merge", "--no-ff", "--signoff", "-m", message, ref], dest, ok=True)
+        # No rename detection: with it a deletion paired with a similar new file shows as one unmerged path
+        # and the deletion would be resolved without being listed (-X no-renames alone is a no-op under ort).
+        proc = git.run(
+            ["merge", "--no-ff", "-s", "recursive", "-X", "no-renames", "--signoff", "-m", message, ref], dest, ok=True
+        )
         if proc.returncode == 0:
             return
-        unmerged = git.run(["diff", "--name-only", "--diff-filter=U"], dest, ok=True).stdout.split()
+        listing = git.run(["diff", "--name-only", "-z", "--diff-filter=U"], dest, ok=True).stdout
+        unmerged = [p for p in listing.split("\0") if p]
         globs = self.cand.regenerated.get(repo, [])
         if pr is not None and unmerged:
             outside = [p for p in unmerged if not any(glob_match(g, p) for g in globs)]
@@ -404,6 +416,7 @@ class Rc:
                     sha for sha in (read_sha(dest / ENGINE_COMMIT_FILE), read_sha(dest / ".framework-ref")) if sha
                 }
                 for name, sha in want.items():
+                    refuse_symlink(dest, dest / name)
                     (dest / name).write_text(sha + "\n", encoding="utf-8")
                 copies = rewrite_engine_pins(dest, old_engine, heads[check.ENGINE])
                 git.run(["add", *want, *copies], dest)
@@ -458,7 +471,7 @@ class Rc:
                 )
             except (ValueError, UnicodeDecodeError):
                 value = ""
-            lines.append(f"- {name}: {value or 'unreadable'}")
+            lines.append(f"- {name}: {value if SHA_RE.fullmatch(value) else 'unreadable'}")
         return lines
 
     def pr_body(self, repo: str) -> str:

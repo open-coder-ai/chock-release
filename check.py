@@ -463,7 +463,12 @@ class Checker:
                 return None
             batch = data[key]
             items.extend(batch)
-            if len(items) >= int(data.get("total_count", 0)) or not batch:
+            try:
+                total = int(data.get("total_count", 0))
+            except (ValueError, TypeError):
+                self.r.refuse(f"{repo}: cannot read {path}")
+                return None
+            if len(items) >= total or not batch:
                 return items
             page += 1
 
@@ -550,8 +555,15 @@ class Checker:
         runs = data.get("workflow_runs") if isinstance(data, dict) else None
         if not isinstance(runs, list):
             return [(f"check 2: {repo}: cannot read runs of {workflow}", None)]
+        # Only runs of this repo itself count: a fork's PR run can carry the same head sha and branch name.
+        own = f"{OWNER}/{repo}"
         runs = [
-            r for r in runs if isinstance(r, dict) and r.get("head_sha") == commit and r.get("head_branch") == branch
+            r
+            for r in runs
+            if isinstance(r, dict)
+            and r.get("head_sha") == commit
+            and r.get("head_branch") == branch
+            and (r.get("head_repository") or {}).get("full_name", own) == own
         ]
         if not runs:
             hint = " (open the rc draft PR: rc.py prs)" if self.candidate and branch == CANDIDATE_BRANCH else ""
@@ -895,11 +907,11 @@ def check_candidate(path: Path, gh: GitHub) -> tuple[Candidate | None, Manifest 
 def check(manifest_path: Path, gh: GitHub, expect_version: str | None = None) -> tuple[Manifest | None, Result]:
     """Run every check. Every release step runs this again before it writes anything."""
     result = Result()
-    if looks_like_candidate(manifest_path):
-        result.refuse(f"manifest: {manifest_path.name} is a release candidate, not a manifest (check.py --candidate)")
-        return None, result
     if expect_version is not None and not SEMVER.fullmatch(expect_version):
         result.refuse(f"input: version must be MAJOR.MINOR.PATCH, got {expect_version!r}")
+        return None, result
+    if looks_like_candidate(manifest_path):
+        result.refuse(f"manifest: {manifest_path.name} is a release candidate, not a manifest (check.py --candidate)")
         return None, result
     if manifest_path.name.endswith(".example.yaml"):
         result.refuse(f"manifest: {manifest_path.name} is an example, not a release manifest")
