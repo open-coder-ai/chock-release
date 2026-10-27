@@ -26,7 +26,8 @@ repos:
   # opened by the owner's script) is merged, both before `rc.py pins`.
   # 305 (IR-38): README. 306 (IR-F40): titles.
   # The SR-2d2e patch (org-plan#603) is applied on #306's branch with one regeneration (D20), so it needs no separate PR.
-  # The catalog adopts the rc.4 engine before `rc.py pins`.
+  # The catalog keeps its framework pin until release (adopt-framework is a release-prep step, RUNBOOK); the rc.4
+  # engine accepts the catalog's v1 pack hashes (SR-4c, v1 accepted through 1.x).
   chock-catalog:         [293, 295, 297, 301, 303, 304, 305, 306]
   chock-claude-plugins:  [16]
   chock-cursor-plugins:  [15]
