@@ -12,11 +12,12 @@ repos:
   # 325 (SR-5): command output never crashes on a character the stream's encoding cannot represent (IR-F18, the Windows walk-through).
   # 326 (SR-6): test-only; removes a flaky timing failure from rc's CI.
   # All four come after 321. .chock/bin/** and the goldens are re-rendered on rc as for rc.1.
-  # 334 (IR-27b): golden files are POSIX (LF) on every platform. Targets main.
-  # 336 (SR-4c): pack hash v2. Targets main.
-  # chock#335 (IR-33, test) and #337 (IR-F42) target `rc`, not main, so they are not listed: assemble lists only PRs
-  # against base, and the owner's script merges both into rc directly.
-  chock:                 [314, 315, 318, 319, 320, 321, 324, 325, 326, 334, 336]
+  # chock#334 (IR-27b, golden POSIX) and #336 (SR-4c, pack hash v2) target main and are not listed: assemble refuses a
+  # listed PR that is not open, so the owner's rc.4 script merges both to main first and they reach rc through
+  # assemble's main merge.
+  # chock#335 (IR-33, test) and #337 (IR-F42) target `rc`, not main, so they are not listed either: assemble lists only
+  # PRs against base, and the owner's script merges both into rc directly.
+  chock:                 [314, 315, 318, 319, 320, 321, 324, 325, 326]
   # chock-catalog is merge-first, not assembled: these PRs are merged to the catalog's main first (gated by its own
   # CI; the owner merges), then rc.py pins pins the catalog's main head. rc.py assemble and prs skip it.
   # 293, 295 and 297 are already merged on the catalog's main (af010c7).
@@ -24,7 +25,7 @@ repos:
   # 303 is merged (eb08423). 304 merges first, then the installed-copy sync PR (branch `sync-installed-after-sr-2d2`,
   # opened by the owner's script) is merged, both before `rc.py pins`.
   # 305 (IR-38): README. 306 (IR-F40): titles.
-  # The SR-2d2e patch (org-plan#603) becomes a catalog PR opened by the owner's script, so it has no number to list here.
+  # The SR-2d2e patch (org-plan#603) is applied on #306's branch with one regeneration (D20), so it needs no separate PR.
   # The catalog adopts the rc.4 engine before `rc.py pins`.
   chock-catalog:         [293, 295, 297, 301, 303, 304, 305, 306]
   chock-claude-plugins:  [16]
@@ -35,10 +36,12 @@ repos:
   # chock-site#11 was merged to main (about 02:08Z); assemble refuses a listed PR that is not open, so it is no longer listed.
   # chock-site#76, #81, #82 and #83 went to the site's main, so they are not listed.
   # 84 (IR-22): the adopt walk-through records the real `chock add` result at the rc.2 catalog pin, and the build refuses a recorded step whose exit differs.
-  # 85 (vendor-quote dates) and 93 (E10: favicon and social card, staging noindex, one docs sentence) both target main.
-  # chock-site#92 (IR-39) and #94 (SR-4c site) target `rc`, not main, so they are not listed: the owner's script
-  # merges both into rc directly.
-  chock-site:            [78, 80, 84, 85, 93]
+  # chock-site#85 (vendor-quote dates) and #93 (E10: favicon and social card, staging noindex, one docs sentence) target
+  # main and are not listed: the owner's rc.4 script merges both to main first (assemble refuses a listed PR that is
+  # not open), and they reach rc through assemble's main merge.
+  # chock-site#92 (IR-39), #94 (SR-4c site) and the SR-4c-builder site PR (number to come, a third rc-based site PR)
+  # target `rc`, not main, so they are not listed: the owner's script merges them into rc directly.
+  chock-site:            [78, 80, 84]
   chock-quickstart:      []
   chock-example:         []
 # Paths the candidate rewrites on `rc` after assembly (rc.py pins, then chock-site's own regeneration:
