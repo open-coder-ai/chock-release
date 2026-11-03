@@ -1,0 +1,18 @@
+# Release manifest for chock 1.0.0 (org-plan plan/promotion-1.0.0.md, "The manifest, the dry run, the real run").
+# chock-site's commit S is the merge of chock-site#102 (rc.5) into main. Every commit is on its repo's default branch and was checked by the orchestrator:
+# E2 chock#356; C catalog#321 (.framework-ref = E2); P the plugins publish (generated_from.yaml = C + E2, verify
+# green); Q and X the P-4 merges; A agentseam v0.4.1. The owner commits it to chock-release as releases/1.0.0.yaml by PR.
+version: 1.0.0
+repos:
+  chock:                 {commit: "5a4b6287a46e07f9f856d9bbe10622bd1ff2e021"}
+  chock-catalog:         {commit: "1e60d211c1bb767152c6ab0167932da06ab3a10f"}
+  chock-claude-plugins:  {commit: "7267e0ef077ac89f900e1596406247f788e6be6a"}
+  chock-cursor-plugins:  {commit: "d575b6c0e73519ad6895e11380484c000e0c1a61"}
+  chock-codex-plugins:   {commit: "cea43f531889b3956ab8ddfb7b98ede7b7ce86ea"}
+  chock-copilot-plugins: {commit: "e2b883f16535f0f76a567b6c50abf69e8eda0288"}
+  chock-devin-plugins:   {commit: "4cd1b2564793f54d931acaba37630220c1c62e03"}
+  chock-site:            {commit: "3bbbd9a41048bf81faa4e2b39b3f97ca4d5c4f40"}
+  chock-quickstart:      {commit: "ef2e9bdb51691450a3f20303b981d367b4426036"}
+  chock-example:         {commit: "e7221d1ac4c910c65bf30e3413b780587e3e5bdf"}
+inputs:
+  agentseam:             {commit: "17dd700eb0b1f8af9c6bfd42bd9438fd5e4445cb"}   # recorded, not tagged
