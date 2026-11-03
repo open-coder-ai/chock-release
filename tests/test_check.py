@@ -73,9 +73,19 @@ def test_example_manifest_main_exits_nonzero(monkeypatch, capsys):
     assert "REFUSED" in capsys.readouterr().err
 
 
-def test_releases_holds_no_real_manifest():
-    names = sorted(p.name for p in (ROOT / "releases").glob("*.yaml"))
-    assert names == ["1.0.0.example.yaml"]
+def test_every_real_manifest_is_well_formed_and_named_for_its_version():
+    assert (ROOT / "releases" / "1.0.0.example.yaml").is_file()
+    for path in sorted((ROOT / "releases").glob("*.yaml")):
+        if path.name.endswith(".example.yaml"):
+            continue
+        result = check.Result()
+        manifest = check.load_manifest(path, result)
+        assert result.errors == [], f"{path.name}: {result.errors}"
+        assert manifest is not None
+        assert manifest.version == path.stem, f"{path.name} declares version {manifest.version}"
+        assert set(manifest.repos) == set(check.TRAIN), f"{path.name}: repos {sorted(manifest.repos)}"
+        assert set(manifest.inputs) == set(check.INPUTS), f"{path.name}: inputs {sorted(manifest.inputs)}"
+        assert check.PLACEHOLDER_SHA not in {*manifest.repos.values(), *manifest.inputs.values()}
 
 
 def test_refuses_missing_repo(world, run):
