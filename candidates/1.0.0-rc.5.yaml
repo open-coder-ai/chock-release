@@ -1,0 +1,35 @@
+# Release candidate 1.0.0-rc.5: the release build on staging (org-plan plan/promotion-1.0.0.md, "rc.5").
+# Every repo's list is empty: the content is on each `main` after the rc-to-main merges (D21), the chock 1.0.0
+# release PR (P-5) and the catalog's adopt-framework (step 4). `rc.py assemble` merges `main` into each `rc`;
+# `rc.py pins` sets chock-site's .catalog-ref to the catalog's main head (C) and .framework-ref to chock's rc head
+# (E, since rc then equals main); the P-6 worker regenerates the site on `rc`. Nothing here is tagged or published.
+# The owner commits this file to chock-release as candidates/1.0.0-rc.5.yaml.
+version: 1.0.0
+base: main
+repos:
+  chock:                 []
+  chock-catalog:         []
+  chock-claude-plugins:  []
+  chock-cursor-plugins:  []
+  chock-codex-plugins:   []
+  chock-copilot-plugins: []
+  chock-devin-plugins:   []
+  chock-site:            []
+  chock-quickstart:      []
+  chock-example:         []
+regenerated:
+  chock:
+    - .chock/bin/**
+    - tests/fixtures/runtime_goldens/**
+    - tests/fixtures/plugin_targets/**
+  chock-site:
+    - .framework-ref
+    - .catalog-ref
+    - data/catalog-source/**
+    - data/docs-source/**
+    - data/write-source/**
+    - data/cli-examples/**
+    - data/agentseam-source/**
+    - data/agentseam-run.json
+    - data/kinds/engine-commit.txt
+    - data/architecture/*.json
