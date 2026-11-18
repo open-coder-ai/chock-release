@@ -1,0 +1,20 @@
+# Release manifest for chock 1.2.0 (org-plan plan/release-1.2.0.md, release train R-8). Every commit is the merge on its
+# repo's default branch, checked by the orchestrator on 2026-11-18: E chock#386 (version 1.2.0; ci.yml green);
+# C chock-catalog#335 (.framework-ref = E, VERSION 1.2.0; ci.yml green); P the plugins publish of C + E
+# (generated_from.yaml = C + E, generated-only.yml verify green); S chock-site#113 and #114 (.framework-ref = E, .catalog-ref = C);
+# Q chock-quickstart#22 and X chock-example#26 (README pins E); A agentseam 0.4.1, unchanged since 1.0.0.
+# The owner commits it to chock-release as releases/1.2.0.yaml with owner-release.ps1 -Step R4 -Version 1.2.0.
+version: 1.2.0
+repos:
+  chock:                 {commit: "5088f2f17df0c10b3269a68685a3500ffea6516a"}
+  chock-catalog:         {commit: "e3d71d03e4dd32377ad5bc19fb6bacdfe6607ea4"}
+  chock-claude-plugins:  {commit: "85f85bcd531ecaa10b544b668068b8c51f58a7b5"}
+  chock-cursor-plugins:  {commit: "e946ac84a8e1c2766c21d0e1fbb7da7fa9eaaab3"}
+  chock-codex-plugins:   {commit: "ac64d92f7c77b82d459c486b9754231671169734"}
+  chock-copilot-plugins: {commit: "b1c05c68afd6b08335abf92cba4ed93dd1819737"}
+  chock-devin-plugins:   {commit: "95259afc92100cb79e2fbd1aeda2731684ecec35"}
+  chock-site:            {commit: "58c559c500fb2df26f82fcc430a215ccae80fcf2"}
+  chock-quickstart:      {commit: "f84849cb516b54c54e3161fea3c2769535685a1d"}
+  chock-example:         {commit: "b930e774daa0ed226bebca514c3a3fedebbb8ec4"}
+inputs:
+  agentseam:             {commit: "17dd700eb0b1f8af9c6bfd42bd9438fd5e4445cb"}   # recorded, not tagged
